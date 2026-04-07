@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Perspective ↔ KDB+/Q Direct</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: sans-serif; background: #1a1a2e; color: #eee; }
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 16px; background: #16213e; border-bottom: 1px solid #0f3460;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    #status {
+      margin-left: auto; font-size: 0.8rem; padding: 3px 10px;
+      border-radius: 12px; background: #333; color: #aaa;
+    }
+    #status.connected    { background: #1a4731; color: #4caf50; }
+    #status.disconnected { background: #4a1a1a; color: #f44336; }
+    #controls {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 16px; background: #16213e; border-bottom: 1px solid #0f3460;
+      flex-wrap: wrap;
+    }
+    #controls label { font-size: 0.85rem; color: #aaa; }
+    #controls input, #controls select {
+      background: #0f3460; color: #eee; border: 1px solid #1a4a8a;
+      padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;
+    }
+    #controls button {
+      background: #0f3460; color: #90caf9; border: 1px solid #1a4a8a;
+      padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
+    }
+    #controls button:hover { background: #1a4a8a; }
+    #viewer-container { display: flex; flex-direction: column; height: calc(100vh - 88px); }
+    perspective-viewer { flex: 1; }
+  </style>
+
+  <!--
+    Load Perspective from the local build or a CDN.
+    Adjust the src paths to match your deployment.
+    For a local build: use ../../packages/perspective/dist/cdn/perspective.js etc.
+    For CDN: use https://cdn.jsdelivr.net/npm/@finos/perspective/dist/cdn/perspective.js
+  -->
+  <script type="module">
+    // -----------------------------------------------------------------------
+    // Configuration — override via URL params:
+    //   ?host=myserver&port=8765&table=trade
+    // -----------------------------------------------------------------------
+    const params  = new URLSearchParams(location.search);
+    const WS_HOST = params.get("host")  || location.hostname || "localhost";
+    const WS_PORT = params.get("port")  || "8765";
+    const WS_URL  = `ws://${WS_HOST}:${WS_PORT}`;
+
+    // -----------------------------------------------------------------------
+    // Dynamic module imports (adjust paths for your environment)
+    // -----------------------------------------------------------------------
+    const pspModule = await import(
+      params.get("pspJs") ||
+      "../../node_modules/@finos/perspective/dist/cdn/perspective.js"
+    );
+    await import(
+      params.get("viewerJs") ||
+      "../../node_modules/@finos/perspective-viewer/dist/cdn/perspective-viewer.js"
+    );
+    await import(
+      params.get("datagridJs") ||
+      "../../node_modules/@finos/perspective-viewer-datagrid/dist/cdn/perspective-viewer-datagrid.js"
+    );
+    // Optional: d3fc plugin
+    // await import("../../node_modules/@finos/perspective-viewer-d3fc/dist/cdn/perspective-viewer-d3fc.js");
+
+    const perspective = pspModule.default;
+
+    // -----------------------------------------------------------------------
+    // UI references
+    // -----------------------------------------------------------------------
+    const statusEl  = document.getElementById("status");
+    const tablesSel = document.getElementById("table-select");
+    const viewer    = document.getElementById("viewer");
+
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = cls || "";
+    }
+
+    // -----------------------------------------------------------------------
+    // Connect to the KDB+ WebSocket server
+    // -----------------------------------------------------------------------
+    setStatus("Connecting…");
+    let worker, server;
+
+    try {
+      worker = await perspective.worker();
+      server = await perspective.websocket(WS_URL);
+      setStatus("Connected", "connected");
+    } catch (e) {
+      setStatus("Connection failed", "disconnected");
+      console.error("Perspective WebSocket connection failed:", e);
+    }
+
+    // -----------------------------------------------------------------------
+    // Populate the table selector from hosted tables
+    // -----------------------------------------------------------------------
+    async function loadTableList() {
+      if (!server) return;
+      try {
+        const tables = await server.get_hosted_table_names();
+        tablesSel.innerHTML = tables.map(
+          t => `<option value="${t}">${t}</option>`
+        ).join("");
+        // Pre-select from URL param if provided
+        const preselect = params.get("table");
+        if (preselect && tables.includes(preselect)) {
+          tablesSel.value = preselect;
+        }
+        if (tables.length > 0) openTable(tablesSel.value);
+      } catch (e) {
+        console.error("Failed to fetch table list:", e);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Open a table and bind it to the viewer
+    // -----------------------------------------------------------------------
+    async function openTable(name) {
+      if (!server || !name) return;
+      try {
+        const table = await server.open_table(name);
+        await viewer.load(table);
+        // Restore plugin from URL param
+        const plugin = params.get("plugin");
+        if (plugin) await viewer.restore({ plugin });
+      } catch (e) {
+        console.error(`Failed to open table "${name}":`, e);
+      }
+    }
+
+    tablesSel.addEventListener("change", () => openTable(tablesSel.value));
+    document.getElementById("refresh-btn").addEventListener("click", loadTableList);
+
+    // -----------------------------------------------------------------------
+    // Handle WebSocket disconnect / reconnect
+    // -----------------------------------------------------------------------
+    window.addEventListener("unhandledrejection", ev => {
+      if (ev.reason?.message?.includes("WebSocket")) {
+        setStatus("Disconnected", "disconnected");
+      }
+    });
+
+    // Start
+    await loadTableList();
+  </script>
+</head>
+<body>
+  <header>
+    <h1>Perspective ↔ KDB+/Q</h1>
+    <span id="status">Initialising…</span>
+  </header>
+
+  <div id="controls">
+    <label for="table-select">Table:</label>
+    <select id="table-select"><option value="">— loading —</option></select>
+    <button id="refresh-btn">↻ Refresh</button>
+  </div>
+
+  <div id="viewer-container">
+    <perspective-viewer id="viewer"></perspective-viewer>
+  </div>
+</body>
+</html>

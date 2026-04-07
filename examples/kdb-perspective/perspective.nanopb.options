@@ -1,0 +1,122 @@
+# perspective.nanopb.options
+#
+# nanopb field-size constraints for perspective.proto.
+#
+# nanopb uses static allocation; every string and repeated field needs an
+# explicit max_size (bytes per element) and max_count (number of elements).
+# Values here are generous defaults suited for typical financial data sets
+# (hundreds of columns, tens of thousands of rows per viewport slice).
+#
+# Regenerate after editing by running:  make clean && make
+
+# ---------------------------------------------------------------------------
+# Outer Request / Response envelopes
+# ---------------------------------------------------------------------------
+perspective.proto.Request.entity_id                                 max_size:256
+perspective.proto.Response.entity_id                                max_size:256
+
+# ---------------------------------------------------------------------------
+# Schema (column name + type pairs)
+# ---------------------------------------------------------------------------
+perspective.proto.Schema.schema                                      max_count:512
+perspective.proto.Schema.KeyTypePair.name                           max_size:256
+
+# ---------------------------------------------------------------------------
+# HostedTable (get_hosted_tables response)
+# ---------------------------------------------------------------------------
+perspective.proto.GetHostedTablesResp.table_infos                   max_count:2048
+perspective.proto.HostedTable.entity_id                             max_size:256
+
+# ---------------------------------------------------------------------------
+# ViewConfig — group_by / split_by
+# ---------------------------------------------------------------------------
+perspective.proto.ViewConfig.group_by                               max_count:64 max_size:256
+perspective.proto.ViewConfig.split_by                               max_count:64 max_size:256
+
+# ---------------------------------------------------------------------------
+# ViewConfig — filter
+# ---------------------------------------------------------------------------
+perspective.proto.ViewConfig.filter                                 max_count:128
+perspective.proto.ViewConfig.Filter.column                          max_size:256
+perspective.proto.ViewConfig.Filter.op                              max_size:32
+perspective.proto.ViewConfig.Filter.value                           max_count:16
+
+# ---------------------------------------------------------------------------
+# ViewConfig — sort
+# ---------------------------------------------------------------------------
+perspective.proto.ViewConfig.sort                                   max_count:64
+perspective.proto.ViewConfig.Sort.column                            max_size:256
+
+# ---------------------------------------------------------------------------
+# ViewConfig — expressions  (map<string,string> → repeated MapEntry)
+# ---------------------------------------------------------------------------
+perspective.proto.ViewConfig.expressions                            max_count:64
+perspective.proto.ViewConfig.ExpressionsEntry.key                   max_size:256
+perspective.proto.ViewConfig.ExpressionsEntry.value                 max_size:4096
+
+# ---------------------------------------------------------------------------
+# ViewConfig — aggregates  (map<string,AggList> → repeated MapEntry)
+# ---------------------------------------------------------------------------
+perspective.proto.ViewConfig.aggregates                             max_count:256
+perspective.proto.ViewConfig.AggregatesEntry.key                    max_size:256
+perspective.proto.ViewConfig.AggList.aggregations                   max_count:8 max_size:64
+
+# ---------------------------------------------------------------------------
+# ColumnsUpdate (opt_columns oneof)
+# ---------------------------------------------------------------------------
+perspective.proto.ColumnsUpdate.Columns.columns                     max_count:512 max_size:256
+
+# ---------------------------------------------------------------------------
+# Scalar (filter values)
+# ---------------------------------------------------------------------------
+perspective.proto.Scalar.string                                     max_size:1024
+
+# ---------------------------------------------------------------------------
+# ViewColumnPaths response
+# ---------------------------------------------------------------------------
+perspective.proto.ViewColumnPathsResp.paths                         max_count:512 max_size:512
+
+# ---------------------------------------------------------------------------
+# GetFeaturesResp — filter_ops / aggregates maps
+# ---------------------------------------------------------------------------
+perspective.proto.GetFeaturesResp.filter_ops                        max_count:8
+perspective.proto.GetFeaturesResp.aggregates                        max_count:8
+perspective.proto.GetFeaturesResp.ColumnTypeOptions.options         max_count:16 max_size:64
+perspective.proto.GetFeaturesResp.AggregateOptions.aggregates       max_count:32
+perspective.proto.GetFeaturesResp.AggregateArgs.name                max_size:64
+perspective.proto.GetFeaturesResp.AggregateArgs.args                max_count:4
+
+# ---------------------------------------------------------------------------
+# TableValidateExpr
+# ---------------------------------------------------------------------------
+perspective.proto.TableValidateExprReq.column_to_expr               max_count:64
+perspective.proto.TableValidateExprReq.ColumnToExprEntry.key        max_size:256
+perspective.proto.TableValidateExprReq.ColumnToExprEntry.value      max_size:4096
+perspective.proto.TableValidateExprResp.expression_schema           max_count:64
+perspective.proto.TableValidateExprResp.ExpressionSchemaEntry.key   max_size:256
+perspective.proto.TableValidateExprResp.errors                      max_count:64
+perspective.proto.TableValidateExprResp.ErrorsEntry.key             max_size:256
+perspective.proto.TableValidateExprResp.ExprValidationError.error_message max_size:1024
+perspective.proto.TableValidateExprResp.expression_alias            max_count:64
+perspective.proto.TableValidateExprResp.ExpressionAliasEntry.key    max_size:256
+perspective.proto.TableValidateExprResp.ExpressionAliasEntry.value  max_size:256
+
+# ---------------------------------------------------------------------------
+# ViewSchema response
+# ---------------------------------------------------------------------------
+perspective.proto.ViewSchemaResp.schema                             max_count:512
+perspective.proto.ViewSchemaResp.SchemaEntry.key                    max_size:256
+
+# ---------------------------------------------------------------------------
+# ViewGetMinMax
+# ---------------------------------------------------------------------------
+perspective.proto.ViewGetMinMaxReq.column_name                      max_size:256
+
+# ---------------------------------------------------------------------------
+# ViewToColumnsString / ViewToRowsString / ViewToNdjson (JSON fallback paths)
+# These responses can be large; we pass them through as byte pointers.
+# ---------------------------------------------------------------------------
+perspective.proto.ViewToColumnsStringResp.json_string               max_size:1
+perspective.proto.ViewToRowsStringResp.json_string                  max_size:1
+perspective.proto.ViewToNdjsonStringResp.ndjson_string              max_size:1
+perspective.proto.ViewToCSVResp.csv                                 max_size:1
