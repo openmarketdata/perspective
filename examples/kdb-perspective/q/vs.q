@@ -270,7 +270,9 @@
     // Apply start_col/end_col viewport if specified
     sc: payload 0; ec: payload 1;
     if[not sc = 0x80000000i; paths: sc _ paths];
-    if[not ec = 0x80000000i; paths: (ec - $[sc = 0x80000000i; 0; sc]) # paths];
+    if[not ec = 0x80000000i;
+        rem: $[sc = 0x80000000i; 0; sc];
+        paths: (ec - rem) # paths];
     .psp.pb.encodeViewColumnPaths[msg_id; entity_id; paths]
  };
 

@@ -30,7 +30,7 @@
 .psp.rt.subscribe: {[h; view_id; msg_id]
     // Remove any existing subscription for this (handle, view_id) pair
     .psp.rt.subs: delete from .psp.rt.subs
-        where (handle = h) and (view_id ~ \: view_id);
+        where (handle = h) and (view_id ~ \: .psp.rt.subs`view_id);
     // Look up the table this view covers
     st: .psp.wss.sessions[h];
     tbl_id: $[(view_id in key st[`viewToTable]); st[`viewToTable;view_id]; ""];
@@ -44,7 +44,7 @@
 // ---------------------------------------------------------------------------
 .psp.rt.unsubscribe: {[h; view_id]
     .psp.rt.subs: delete from .psp.rt.subs
-        where (handle = h) and (view_id ~ \: view_id)
+        where (handle = h) and (view_id ~ \: .psp.rt.subs`view_id)
  };
 
 // ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ QHOME      ?= $(HOME)/q
 
 # nanopb Python package location (auto-detected from pip install nanopb)
 NANOPB_PKG := $(shell python3 -c \
-    "import nanopb, os; print(os.path.dirname(os.path.abspath(nanopb.__file__)))" 2>/dev/null)
+    "import nanopb, os; print(os.path.dirname(os.path.abspath(nanopb.__file__)))")
 
 ifeq ($(NANOPB_PKG),)
 $(error "nanopb Python package not found. Run: pip install nanopb")

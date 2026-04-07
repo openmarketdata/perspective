@@ -56,7 +56,7 @@
 .psp.t.typeMap[2j]:  0i;
 
 // Enum types (20-76) → STRING
-.psp.t.typeMap[,] ./: ((!57) + 20j)!57#0i;
+{.psp.t.typeMap[x]: 0i} each 20 + til 57;
 
 // ---------------------------------------------------------------------------
 // .psp.t.kdbTypeToColType[t]

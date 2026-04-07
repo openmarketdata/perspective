@@ -121,7 +121,7 @@
     sc: vp[`start_col]; ec: vp[`end_col];
     if[(not sc = null_int) and not ec = null_int;
         all_cols: cols rows;
-        sub_cols: all_cols sc _ (ec - sc) # all_cols;
+        sub_cols: (ec - sc) # sc _ all_cols;
         rows: sub_cols # rows];
 
     rows
@@ -205,7 +205,7 @@
       op ~ "begins with";(like; col; ($[10h = type val; val; string val]),"*");
       op ~ "ends with";  (like; col; "*",$[10h = type val; val; string val]);
       op ~ "is null";    (null; col);
-      op ~ "is not null";((^); col; col);  // col ^ col = col when not null
+      op ~ "is not null";(not; (null; col));
       op ~ "in";         (in; col; $[0h = type raw; raw; enlist raw]);
       op ~ "not in";     (not; (in; col; $[0h = type raw; raw; enlist raw]));
       (::)]             // unsupported operator

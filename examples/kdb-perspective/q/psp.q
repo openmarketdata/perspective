@@ -31,8 +31,15 @@ if[not ""~getenv`PSP_ARROWKDB;  .psp.cfg.arrowkdb:   `$getenv`PSP_ARROWKDB];
 
 // ---------------------------------------------------------------------------
 // Load modules in dependency order
+// Resolve the directory containing this script so that \l works regardless
+// of the working directory from which q was invoked.
 // ---------------------------------------------------------------------------
-system"cd ",.psp.SRCDIR:string[first ` vs hsym`$-1_string .z.f," "];
+// .z.f is the script path supplied to q (e.g. "q/psp.q" or "/abs/path/psp.q").
+// We convert to an absolute hsym, strip the filename, and cd into that directory.
+.psp.SRCDIR: 1_string first ` vs hsym .z.f;
+if[not "/"~first .psp.SRCDIR;
+    .psp.SRCDIR: (system"pwd"),"/",raze{(c _ x),c:last where x="/"} .psp.SRCDIR];
+system "cd ",.psp.SRCDIR;
 
 \l type_map.q
 \l arrow.q
