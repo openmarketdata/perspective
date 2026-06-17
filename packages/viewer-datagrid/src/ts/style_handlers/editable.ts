@@ -12,7 +12,9 @@
 
 import { RegularTableElement } from "regular-table";
 
-import type { DatagridModel, PerspectiveViewerElement } from "../types.js";
+import type { DatagridModel } from "../types.js";
+import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
+import { styleColumnHeaderRow } from "./column_header.js";
 
 import { CollectedHeaderRow } from "./types.js";
 
@@ -20,15 +22,17 @@ import { CollectedHeaderRow } from "./types.js";
  * Apply styles to column header rows.
  */
 export function applyColumnHeaderStyles(
-    this: DatagridModel,
+    model: DatagridModel,
     headerRows: CollectedHeaderRow[],
     regularTable: RegularTableElement,
-    viewer: PerspectiveViewerElement,
+    viewer: HTMLPerspectiveViewerElement,
 ): void {
-    if (headerRows.length === 0) return;
+    if (headerRows.length === 0) {
+        return;
+    }
 
     // Style selected column for settings panel
-    const selectedColumn = this._column_settings_selected_column;
+    const selectedColumn = model._column_settings_selected_column;
     const len = headerRows.length;
     const settings_open = viewer.hasAttribute("settings");
 
@@ -66,7 +70,9 @@ export function applyColumnHeaderStyles(
             for (let i = 0; i < titlesRow.cells.length; i++) {
                 const title = titlesRow.cells[i]?.element;
                 const editBtn = editBtnsRow.cells[i]?.element;
-                if (!title || !editBtn) continue;
+                if (!title || !editBtn) {
+                    continue;
+                }
 
                 const open = title.textContent === selectedColumn;
                 title.classList.toggle("psp-menu-open", open);
@@ -76,19 +82,19 @@ export function applyColumnHeaderStyles(
     }
 
     // Style the actual column header rows
-    const colHeadersIndex = this._config.split_by.length;
+    const colHeadersIndex = model._config.split_by.length;
     if (colHeadersIndex < headerRows.length) {
         const colHeaders = headerRows[colHeadersIndex];
         if (colHeaders) {
-            this._styleColumnHeaderRow(colHeaders, regularTable, false);
+            styleColumnHeaderRow(model, colHeaders, regularTable, false);
         }
     }
 
-    const menuHeadersIndex = this._config.split_by.length + 1;
+    const menuHeadersIndex = model._config.split_by.length + 1;
     if (menuHeadersIndex < headerRows.length) {
         const menuHeaders = headerRows[menuHeadersIndex];
         if (menuHeaders) {
-            this._styleColumnHeaderRow(menuHeaders, regularTable, true);
+            styleColumnHeaderRow(model, menuHeaders, regularTable, true);
         }
     }
 }

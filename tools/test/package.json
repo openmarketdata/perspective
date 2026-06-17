@@ -1,6 +1,6 @@
 {
     "name": "@perspective-dev/test",
-    "version": "4.4.0",
+    "version": "4.5.1",
     "description": "Test utility based on perspective",
     "private": true,
     "main": "src/js/index.ts",
@@ -22,7 +22,6 @@
     "dependencies": {
         "react": "catalog:",
         "react-dom": "catalog:",
-        "tar": "catalog:",
         "tsx": "catalog:",
         "prettier": "catalog:",
         "superstore-arrow": "catalog:",

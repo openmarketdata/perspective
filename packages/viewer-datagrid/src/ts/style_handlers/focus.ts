@@ -11,18 +11,18 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import { RegularTableElement } from "regular-table";
-import type { DatagridModel, SelectedPosition } from "../types.js";
-import { CollectedCell, LocalSelectedPositionMap } from "./types.js";
+import type { DatagridModel, SelectedPositionMap } from "../types.js";
+import { CollectedCell } from "./types.js";
 
 /**
  * Apply focus style to the selected cell.
  * Optimized to use collected cells instead of querySelectorAll.
  */
 export function applyFocusStyle(
-    this: DatagridModel,
+    _model: DatagridModel,
     cells: CollectedCell[],
     regularTable: RegularTableElement,
-    selectedPositionMap: LocalSelectedPositionMap,
+    selectedPositionMap: SelectedPositionMap,
 ): void {
     const selected_position = selectedPositionMap.get(regularTable);
     const host = regularTable.getRootNode() as Document;
@@ -37,6 +37,7 @@ export function applyFocusStyle(
                 if (host.activeElement !== td) {
                     td.focus({ preventScroll: true });
                 }
+
                 return;
             }
         }
@@ -60,7 +61,7 @@ export function applyFocusStyle(
  */
 export function focusSelectedCell(
     regularTable: RegularTableElement,
-    selectedPositionMap: Map<RegularTableElement, SelectedPosition>,
+    selectedPositionMap: SelectedPositionMap,
 ): boolean {
     const selected_position = selectedPositionMap.get(regularTable);
     if (!selected_position) {
@@ -82,6 +83,7 @@ export function focusSelectedCell(
                     if (host.activeElement !== cell) {
                         (cell as HTMLElement).focus({ preventScroll: true });
                     }
+
                     return true;
                 }
             }

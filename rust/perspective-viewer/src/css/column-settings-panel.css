@@ -15,6 +15,7 @@
     #column_settings_sidebar {
         overflow: hidden;
         text-overflow: ellipsis;
+        z-index: 4;
 
         #attributes-button-panel {
             flex: 0 0 auto;
@@ -74,20 +75,22 @@
             border-radius: 3px;
             outline-width: 1px;
             outline-color: var(--psp-inactive--color);
+            padding-left: 4px;
 
             &.editable {
+                outline-style: dashed;
                 &:hover {
                     outline-style: solid;
                     cursor: text;
                 }
             }
-            &:focus {
+            &.editable:focus {
                 outline-style: solid;
                 background: var(--psp--background-color);
             }
-            &.edited {
+            /* &.edited {
                 outline-style: dashed;
-            }
+            } */
             &.invalid {
                 outline-color: var(--psp-error--color);
             }
@@ -130,12 +133,41 @@
         content: var(--psp-label--time-style--content, "Time Style");
     }
 
-    label#foreground-label:before {
-        content: var(--psp-label--foreground--content, "Foreground");
+    label#number_fg_mode-label:before {
+        content: var(--psp-label--number-fg-mode--content, "Foreground");
     }
 
-    label#background-label:before {
-        content: var(--psp-label--background--content, "Background");
+    label#pos_fg_color-label:before {
+        content: var(--psp-label--number-fg-mode--content, "Foreground");
+    }
+
+    label#number_bg_mode-label:before {
+        content: var(--psp-label--number-fg-mode--content, "Background");
+    }
+
+    label#pos_bg_color-label:before {
+        content: var(--psp-label--pos-bg-color--content, "Background");
+    }
+
+    label#datetime_color_mode-label:before {
+        content: var(--psp-label--datetime-color-mode--content, "Color");
+    }
+
+    label#string_color_mode-label:before {
+        content: var(--psp-label--string-color-mode--content, "Color");
+    }
+
+    label#chart-type-label:before,
+    label#chart_type-label:before {
+        content: var(--psp-label--chart-type--content, "Chart Type");
+    }
+
+    label#stack-label:before {
+        content: var(--psp-label--stack--content, "Stack");
+    }
+
+    label#interpolate-label:before {
+        content: var(--psp-label--interpolate--content, "Interpolate null");
     }
 
     label#series-label:before {
@@ -180,8 +212,12 @@
         content: var(--psp-label--aggregate-depth--content, "Aggregate Depth");
     }
 
-    label#max-value-label:before {
-        content: var(--psp-label--max-value--content, "Max Value");
+    label#fg_gradient-label:before {
+        content: var(--psp-label--fg-gradient--content, "Max Value");
+    }
+
+    label#bg_gradient-label:before {
+        content: var(--psp-label--bg-gradient--content, "Max Value");
     }
 
     label#rounding-priority-label:before {

@@ -13,7 +13,7 @@
 import perspective from "/node_modules/@perspective-dev/client/dist/cdn/perspective.js";
 import "/node_modules/@perspective-dev/viewer/dist/cdn/perspective-viewer.js";
 import "/node_modules/@perspective-dev/viewer-datagrid/dist/cdn/perspective-viewer-datagrid.js";
-import "/node_modules/@perspective-dev/viewer-d3fc/dist/cdn/perspective-viewer-d3fc.js";
+import "/node_modules/@perspective-dev/viewer-charts/dist/cdn/perspective-viewer-charts.js";
 
 const RESOLUTION = 100;
 
@@ -137,10 +137,9 @@ const LAYOUT = {
     theme: "Pro Dark",
 };
 
-const heatmap_plugin = await window.viewer.getPlugin("Heatmap");
-heatmap_plugin.max_cells = 100000;
 const worker = await perspective.worker();
 const index = new Array(Math.pow(RESOLUTION, 2)).fill(0);
 worker.table({ index }, { name: "raycasting" });
 window.viewer.load(worker);
 await window.viewer.restore(LAYOUT);
+document.querySelector("#rendering_label").remove();

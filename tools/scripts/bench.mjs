@@ -11,13 +11,19 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import * as dotenv from "dotenv";
-import sh from "./sh.mjs";
 import { get_scope } from "./sh_perspective.mjs";
+import { execSync } from "node:child_process";
+
+import "zx/globals";
 
 dotenv.config({ path: "./.perspectiverc", quiet: true });
 const scope = get_scope();
-if (scope.includes("client")) {
-    sh`pnpm run --recursive --filter bench bench_js`.runSync();
+if (scope.includes("viewer-charts")) {
+    await $`pnpm run --recursive --filter bench bench_charts`.pipe(
+        process.stdout,
+    );
+} else if (scope.includes("client")) {
+    await $`pnpm run --recursive --filter bench bench_js`.pipe(process.stdout);
 } else if (scope.includes("python")) {
-    sh`pnpm run --recursive --filter bench bench_python`.runSync();
+    $.sync`pnpm run --recursive --filter bench bench_python`;
 }

@@ -89,7 +89,6 @@ test.describe("Events", () => {
         await page.evaluate(async () => {
             const viewer = document.querySelector("perspective-viewer");
             window["acc"] = [];
-
             await viewer!.restore({
                 settings: true,
             });

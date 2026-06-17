@@ -4,7 +4,7 @@
         "type": "git",
         "url": "https://github.com/perspective-dev/perspective"
     },
-    "version": "4.4.0",
+    "version": "4.5.1",
     "changelog": {
         "labels": {
             "enhancement": "Added",
@@ -25,8 +25,7 @@
         "tools/esbuild-plugin",
         "packages/react",
         "packages/viewer-datagrid",
-        "packages/viewer-d3fc",
-        "packages/viewer-openlayers",
+        "packages/viewer-charts",
         "packages/workspace",
         "packages/jupyterlab",
         "packages/cli",
@@ -45,18 +44,19 @@
         "@perspective-dev/server": "workspace:^",
         "@perspective-dev/test": "workspace:^",
         "@perspective-dev/viewer": "workspace:^",
-        "@perspective-dev/viewer-d3fc": "workspace:^",
+        "@perspective-dev/viewer-charts": "workspace:^",
         "@perspective-dev/viewer-datagrid": "workspace:^",
-        "@perspective-dev/viewer-openlayers": "workspace:^",
         "@perspective-dev/workspace": "workspace:^",
         "@playwright/experimental-ct-react": "catalog:",
         "@playwright/test": "catalog:",
         "chalk": "catalog:",
         "dotenv": "catalog:",
+        "eslint": "catalog:",
         "husky": "catalog:",
         "npm-run-all": "catalog:",
         "prettier": "catalog:",
-        "tsx": "catalog:"
+        "tsx": "catalog:",
+        "typescript-eslint": "catalog:"
     },
     "pnpm": {
         "overrides": {

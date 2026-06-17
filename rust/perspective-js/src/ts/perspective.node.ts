@@ -16,6 +16,16 @@ export type * from "./virtual_server.ts";
 import WebSocket, { WebSocketServer as HttpWebSocketServer } from "ws";
 import stoppable from "stoppable";
 import { promises as fs } from "node:fs";
+import {
+    openSync,
+    readSync,
+    writeSync,
+    closeSync,
+    mkdirSync,
+    unlinkSync,
+    rmSync,
+} from "node:fs";
+import os from "node:os";
 import http from "node:http";
 import path from "node:path";
 import { webcrypto } from "node:crypto";
@@ -56,12 +66,123 @@ const uncompressed_client_wasm = await fs
     .then((buffer) => load_wasm_stage_0(buffer.buffer as ArrayBuffer));
 
 await perspective_client.default({ module_or_path: uncompressed_client_wasm });
+
+function make_node_disk_bridge({
+    heap,
+    toAddr,
+    readCString,
+}: {
+    heap: () => Uint8Array;
+    toAddr: (p: number | bigint) => number;
+    readCString: (p: number | bigint) => string;
+}) {
+    const root = path.join(os.tmpdir(), `perspective-${process.pid}`);
+    const resolve_path = (name: string) => {
+        const p = path.join(root, name);
+        if (!p.startsWith(root)) {
+            throw new Error(`refusing disk path outside root: ${name}`);
+        }
+        return p;
+    };
+
+    let cleaned = false;
+    const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        try {
+            rmSync(root, { recursive: true, force: true });
+        } catch (e) {
+            /* best effort */
+        }
+    };
+    process.on("exit", cleanup);
+    process.on("SIGINT", () => {
+        cleanup();
+        process.exit(130);
+    });
+
+    return {
+        // node:fs is synchronous — nothing to pre-open between safepoint phases.
+        async ensureOpen(_name: string) {},
+        store(
+            namePtr: number | bigint,
+            dataPtr: number | bigint,
+            len: number,
+        ): number {
+            try {
+                const p = resolve_path(readCString(namePtr));
+                mkdirSync(path.dirname(p), { recursive: true });
+                const fd = openSync(p, "w");
+                try {
+                    if (len > 0) {
+                        const addr = toAddr(dataPtr);
+                        const view = heap().subarray(addr, addr + len);
+                        let off = 0;
+                        while (off < len) {
+                            off += writeSync(fd, view, off, len - off, off);
+                        }
+                    }
+                } finally {
+                    closeSync(fd);
+                }
+                return len;
+            } catch (e) {
+                console.error("node disk store failed", e);
+                return -1;
+            }
+        },
+        load(
+            namePtr: number | bigint,
+            dataPtr: number | bigint,
+            len: number,
+        ): number {
+            try {
+                if (len <= 0) return 0;
+                let fd: number;
+                try {
+                    fd = openSync(resolve_path(readCString(namePtr)), "r");
+                } catch (e) {
+                    return 0; // never-flushed file reads as zeros
+                }
+                try {
+                    const addr = toAddr(dataPtr);
+                    const view = heap().subarray(addr, addr + len);
+                    let off = 0;
+                    let n: number;
+                    while (
+                        off < len &&
+                        (n = readSync(fd, view, off, len - off, off)) > 0
+                    ) {
+                        off += n;
+                    }
+                    return off;
+                } finally {
+                    closeSync(fd);
+                }
+            } catch (e) {
+                return 0;
+            }
+        },
+        remove(namePtr: number | bigint) {
+            try {
+                unlinkSync(resolve_path(readCString(namePtr)));
+            } catch (e) {
+                /* already gone */
+            }
+        },
+    };
+}
+
 const SYNC_MODULE = await fs
     .readFile(
         resolve("@perspective-dev/server/dist/wasm/perspective-server.wasm"),
     )
     .then((buffer) => load_wasm_stage_0(buffer.buffer as ArrayBuffer))
-    .then((buffer) => compile_perspective(buffer.buffer as ArrayBuffer));
+    .then((buffer) =>
+        compile_perspective(buffer.buffer as ArrayBuffer, {
+            make_disk_bridge: make_node_disk_bridge,
+        }),
+    );
 
 let SYNC_CLIENT: perspective_client.Client;
 
@@ -108,6 +229,7 @@ const CONTENT_TYPES: Record<string, string> = {
     ".arrow": "arraybuffer",
     ".feather": "arraybuffer",
     ".wasm": "application/wasm",
+    ".svg": "image/svg+xml",
 };
 
 /**
@@ -120,7 +242,7 @@ export async function cwd_static_file_handler(
     request: http.IncomingMessage,
     response: http.ServerResponse<http.IncomingMessage>,
     assets = ["./"],
-    { debug = true } = {},
+    { debug = false } = {},
 ) {
     let url =
         request.url
@@ -142,14 +264,16 @@ export async function cwd_static_file_handler(
                     if (debug) {
                         console.log(`200 ${url}`);
                     }
+
                     response.writeHead(200, {
                         "Content-Type": contentType,
                         "Access-Control-Allow-Origin": "*",
                     });
+
                     if (extname === ".arrow" || extname === ".feather") {
-                        response.end(content, "utf-8");
+                        response.end(content, "utf8");
                     } else {
-                        response.end(content);
+                        response.end(content, "utf8");
                     }
 
                     return;
@@ -192,6 +316,18 @@ function buffer_to_arraybuffer(
     }
 }
 
+/**
+ * A simple Node `http`-based WebSocket adapter that exposes a
+ * `PerspectiveServer` over the wire.
+ *
+ * @remarks
+ *
+ * **Security.** `WebSocketServer` is a reference integration with no
+ * authentication, authorization, origin enforcement, or rate limiting, and
+ * is not safe to expose to untrusted networks — see
+ * [`SECURITY.md`](https://github.com/perspective-dev/perspective/blob/master/SECURITY.md)
+ * for the full threat model.
+ */
 export class WebSocketServer {
     _server: http.Server | any; // stoppable has no type ...
     _wss: HttpWebSocketServer;

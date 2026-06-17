@@ -97,34 +97,18 @@ perspective-viewer,
     cursor: pointer;
 }
 
-.psp-row-selected,
-:hover .psp-row-selected,
-:hover th.psp-tree-leaf.psp-row-selected,
-:hover th.psp-tree-label.psp-row-selected {
-    color: white !important;
-    background-color: var(--selected-row--background-color, #ea7319) !important;
-    border-color: var(--selected-row--background-color, #ea7319) !important;
-}
-
 regular-table.flat-group-rollup-mode.vertical-row-headers
     th.psp-tree-label:not(:last-of-type) {
     writing-mode: vertical-lr;
 }
 
-.psp-row-selected.psp-tree-label:not(:hover):before {
-    color: white;
-}
-
-regular-table:not(.flat-group-rollup-mode)
-    .psp-row-selected.psp-tree-label:not(:hover):before {
-    color: white;
-}
-
-.psp-row-subselected,
-:hover .psp-row-subselected,
-:hover th.psp-tree-leaf.psp-row-subselected,
-:hover th.psp-tree-label.psp-row-subselected {
-    background: rgba(234, 115, 25, 0.2) !important;
+.psp-select-region-inactive,
+:hover .psp-select-region-inactive,
+:hover th.psp-tree-leaf.psp-select-region-inactive,
+:hover th.psp-tree-label.psp-select-region-inactive {
+    background-color: var(--psp-inactive--color) !important;
+    color: var(--psp--background-color) !important;
+    border-color: var(--psp--background-color) !important;
 }
 
 .psp-error {
@@ -260,11 +244,48 @@ perspective-viewer.dragging,
     mask-image: var(--psp-icon--sort-abs-col-asc--mask-image);
 }
 
+/* Shift-key affordance: while the user holds Shift on the host
+ * `<perspective-viewer>`, sort-arrow mask-image icons and tree
+ * expand/collapse carets recolor to advertise their Shift-modified actions
+ * (abs-sort and depth-level expand/collapse). Both `:host-context` (shadow
+ * render target) and the bare selector (light render target) are emitted to
+ * cover the runtime branch in datagrid.ts. */
+:host-context(perspective-viewer.shift-active)
+    :is(
+        .psp-header-sort-asc,
+        .psp-header-sort-desc,
+        .psp-header-sort-col-asc,
+        .psp-header-sort-col-desc
+    ):after,
+perspective-viewer.shift-active
+    :is(
+        .psp-header-sort-asc,
+        .psp-header-sort-desc,
+        .psp-header-sort-col-asc,
+        .psp-header-sort-col-desc
+    ):after {
+    background-color: var(
+        --shift-active--color,
+        var(--psp-datagrid--pos-cell--color, #1078d1)
+    );
+}
+
+:host-context(perspective-viewer.shift-active)
+    :is(.psp-tree-label-expand, .psp-tree-label-collapse):before,
+perspective-viewer.shift-active
+    :is(.psp-tree-label-expand, .psp-tree-label-collapse):before {
+    color: var(
+        --shift-active--color,
+        var(--psp-datagrid--pos-cell--color, #1078d1)
+    );
+}
+
 tbody th:last-of-type {
     border-right: 1px solid var(--psp-inactive--border-color, #8b868045);
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
 tbody th:empty {
     background-image: linear-gradient(
         to right,
@@ -316,12 +337,78 @@ regular-table:not(.flat-group-rollup-mode) {
 .psp-align-right {
     text-align: right;
 }
+
+.psp-color-mode-bar {
+    padding: 0 2px;
+}
+
+.psp-color-mode-label-bar {
+    position: relative;
+    padding: 0 2px;
+
+    .psp-bar {
+        isolation: isolate;
+        position: unset;
+    }
+
+    .psp-bar:before {
+        color: transparent;
+        pointer-events: none;
+        content: var(--label);
+        display: inline-flex;
+        justify-content: flex-end;
+        align-items: center;
+        padding: 0 3px;
+    }
+
+    .psp-bar:after {
+        color: var(--psp-label-bar-bg);
+        content: var(--label);
+        mix-blend-mode: difference;
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: inline-flex;
+        justify-content: flex-end;
+        align-items: center;
+        padding: 0 5px;
+    }
+}
+
+.psp-label-bar {
+    inset: 0;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0px;
+}
+
+.psp-label-bar-fill {
+    position: absolute;
+    top: 10%;
+    height: 80%;
+    background: var(--psp-label-bar-color);
+    pointer-events: none;
+}
+
+.psp-label-bar-text {
+    position: relative;
+    color: var(--psp-label-bar-bg);
+    mix-blend-mode: difference;
+    pointer-events: none;
+}
+
 .psp-align-left {
     text-align: left;
 }
+
 .psp-positive:not(:focus) {
     color: var(--psp-datagrid--pos-cell--color);
 }
+
 .psp-negative:not(:focus) {
     color: var(--psp-datagrid--neg-cell--color);
 }
@@ -354,7 +441,7 @@ regular-table table {
     td,
     th {
         border-color: var(--psp-inactive--border-color, #8b868045);
-        height: 23px;
+        height: var(--psp-datagrid--row--height, 23px);
     }
 
     .psp-header-group {
@@ -363,9 +450,10 @@ regular-table table {
 
     th.psp-header-leaf {
         border-bottom-width: 0px;
+
         span {
-            height: 23px;
-            min-height: 23px;
+            height: var(--psp-datagrid--row--height, 23px);
+            min-height: var(--psp-datagrid--row--height, 23px);
         }
     }
 
@@ -395,18 +483,18 @@ regular-table table {
 regular-table
     tbody
     tr:hover
-    td.psp-select-region:not(.psp-row-selected):not(.psp-row-subselected),
+    td.psp-select-region:not(.psp-select-region-inactive),
 regular-table
     tbody
     tr:hover
     + tr
-    td.psp-select-region:not(.psp-row-selected):not(.psp-row-subselected) {
+    td.psp-select-region:not(.psp-select-region-inactive) {
     border-color: var(--psp--background-color) !important;
 }
 
 regular-table tbody tr:hover {
     td.psp-select-region.psp-menu-open {
-        &:not(.psp-row-selected):not(.psp-row-subselected) {
+        &:not(.psp-select-region-inactive) {
             box-shadow:
                 inset -2px 0px 0px var(--psp--background-color),
                 inset 2px 0px 0px var(--psp--background-color);
@@ -445,7 +533,7 @@ regular-table table thead tr:last-child:after {
     width: 10000px;
     box-sizing: border-box;
     display: block;
-    height: 23px;
+    height: var(--psp-datagrid--row--height, 23px);
     content: " ";
     border-bottom: 1px solid var(--psp-inactive--border-color);
 }
@@ -455,7 +543,7 @@ regular-table table tbody tr:after {
     width: 10000px;
     box-sizing: border-box;
     display: block;
-    height: 23px;
+    height: var(--psp-datagrid--row--height, 23px);
     content: " ";
     border-top: 1px solid transparent;
 }
@@ -479,6 +567,7 @@ regular-table table tbody tr:hover + tr:after {
             rgba(0, 128, 255, 0.5)
         );
     }
+
     100% {
         background-color: var(
             --pulse--background-color-end,
@@ -494,6 +583,7 @@ regular-table table tbody tr:hover + tr:after {
             rgba(0, 128, 255, 0.5)
         );
     }
+
     100% {
         background-color: var(
             --pulse--background-color-end,
@@ -509,6 +599,7 @@ regular-table table tbody tr:hover + tr:after {
             rgba(255, 25, 0, 0.5)
         );
     }
+
     100% {
         background-color: var(
             --pulse--background-color-end,
@@ -524,6 +615,7 @@ regular-table table tbody tr:hover + tr:after {
             rgba(255, 25, 0, 0.5)
         );
     }
+
     100% {
         background-color: var(
             --pulse--background-color-end,

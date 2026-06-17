@@ -14,9 +14,10 @@ import { CellMetadataBody } from "regular-table/dist/esm/types.js";
 import {
     type RegularTable,
     type DatagridModel,
-    type PerspectiveViewerElement,
     get_psp_type,
 } from "../../types.js";
+
+import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
 
 export function write_cell(
     table: RegularTable,
@@ -27,6 +28,7 @@ export function write_cell(
     if (!meta) {
         return false;
     }
+
     const type = model._schema[model._column_paths[meta.x!]];
     let text: string | number | boolean | null = active_cell.textContent || "";
     const id = model._ids[meta.y! - meta.y0][0];
@@ -35,12 +37,14 @@ export function write_cell(
         if (isNaN(parsed)) {
             return false;
         }
+
         text = parsed;
     } else if (type === "date" || type === "datetime") {
         const parsed = Date.parse(text);
         if (isNaN(parsed)) {
             return false;
         }
+
         text = parsed;
     } else if (type === "boolean") {
         text = text === "true" ? false : text === "false" ? true : null;
@@ -56,21 +60,21 @@ export function write_cell(
 }
 
 export function clickListener(
-    this: DatagridModel,
+    model: DatagridModel,
     table: RegularTable,
-    _viewer: PerspectiveViewerElement,
+    _viewer: HTMLPerspectiveViewerElement,
     event: MouseEvent,
 ): void {
     const meta = table.getMeta(event.target as HTMLElement);
     if (meta?.type === "body" || meta?.type === "column_header") {
-        const is_editable2 = this._is_editable[meta.x];
-        const is_bool = get_psp_type(this, meta) === "boolean";
+        const is_editable2 = model._is_editable[meta.x];
+        const is_bool = get_psp_type(model, meta) === "boolean";
         const is_null = (event.target as Element).classList.contains(
             "psp-null",
         );
 
         if (is_editable2 && is_bool && !is_null) {
-            write_cell(table, this, event.target as HTMLElement);
+            write_cell(table, model, event.target as HTMLElement);
         }
     }
 }

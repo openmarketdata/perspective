@@ -1,6 +1,6 @@
 {
     "name": "@perspective-dev/jupyterlab",
-    "version": "4.4.0",
+    "version": "4.5.1",
     "description": "A Jupyterlab extension for the Perspective library, designed to be used with perspective-python.",
     "files": [
         "dist/**/*",
@@ -23,9 +23,8 @@
         "test:jupyter:build": "node ./build.mjs --test"
     },
     "dependencies": {
-        "@perspective-dev/viewer-d3fc": "workspace:",
+        "@perspective-dev/viewer-charts": "workspace:",
         "@perspective-dev/viewer-datagrid": "workspace:",
-        "@perspective-dev/viewer-openlayers": "workspace:",
         "@perspective-dev/viewer": "workspace:",
         "@perspective-dev/client": "workspace:",
         "@perspective-dev/server": "workspace:",

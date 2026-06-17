@@ -62,9 +62,9 @@ load_stream(
     const uint32_t length,
     std::shared_ptr<arrow::Table>& table
 ) {
-    arrow::io::BufferReader buffer_reader(
+    arrow::io::BufferReader buffer_reader(std::make_shared<arrow::Buffer>(
         reinterpret_cast<const std::uint8_t*>(ptr), length
-    );
+    ));
 
     auto status = arrow::ipc::RecordBatchStreamReader::Open(&buffer_reader);
     if (!status.ok()) {
@@ -92,9 +92,9 @@ load_file(
     const uint32_t length,
     std::shared_ptr<arrow::Table>& table
 ) {
-    arrow::io::BufferReader buffer_reader(
+    arrow::io::BufferReader buffer_reader(std::make_shared<arrow::Buffer>(
         reinterpret_cast<const std::uint8_t*>(ptr), length
-    );
+    ));
 
     auto status = arrow::ipc::RecordBatchFileReader::Open(&buffer_reader);
     if (!status.ok()) {
@@ -184,6 +184,9 @@ convert_type(const std::string& src) {
     }
     if (src == "timestamp") {
         return DTYPE_TIME;
+    }
+    if (src == "time32" || src == "time64" || src == "time32[s]" ) {
+        return DTYPE_UINT32;
     }
     if (src == "date32" || src == "date64") {
         return DTYPE_DATE;
@@ -776,6 +779,17 @@ copy_array(
                 dest->set_valid(i, false);
             }
         } break;
+        case arrow::Time32Type::type_id: {
+            auto scol = std::static_pointer_cast<arrow::Time32Array>(src);
+            std::memcpy(
+                dest->get_nth<std::uint64_t>(offset),
+                (void*)scol->raw_values(),
+                len * 8
+            );
+        } break;
+        // case arrow::Type {
+            
+        // } break;
         default: {
             std::stringstream ss;
             std::string arrow_type = src->type()->ToString();
@@ -907,19 +921,30 @@ ArrowLoader::fill_column(
             copy_array(col, array, offset, len);
         }
 
-        // Fill validity bitmap
+        // Fill validity bitmap. Operate only on the current chunk's
+        // range [offset, offset+len); a whole-column fill here would
+        // clobber validity bits set by other chunks in a multi-batch
+        // ChunkedArray.
         std::int64_t null_count = array->null_count();
 
         if (null_count == 0) {
-            col->valid_raw_fill();
+            for (uint32_t i = 0; i < len; ++i) {
+                col->set_valid(offset + i, true);
+            }
         } else {
             const uint8_t* null_bitmap = array->null_bitmap_data();
 
             // If the arrow column is of null type, the null
-            // bitmap is a nullptr - so just mark everything as
-            // invalid and move on.
+            // bitmap is a nullptr - so just mark this chunk's rows
+            // as invalid and move on.
             if (null_bitmap == nullptr) {
-                col->invalid_raw_fill();
+                for (uint32_t i = 0; i < len; ++i) {
+                    if (is_update) {
+                        col->unset(offset + i);
+                    } else {
+                        col->clear(offset + i);
+                    }
+                }
             } else {
                 // Read the null bitmap and set the correct rows
                 // as valid

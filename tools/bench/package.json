@@ -15,17 +15,24 @@
     },
     "scripts": {
         "bench_js": "node --experimental-wasm-memory64 basic_suite.mjs",
-        "bench_python": "node --experimental-wasm-memory64 python_suite.mjs"
+        "bench_python": "node --experimental-wasm-memory64 python_suite.mjs",
+        "bench_charts": "node --experimental-wasm-memory64 charts_suite.mjs"
     },
     "author": "",
     "license": "Apache-2.0",
     "devDependencies": {
         "@perspective-dev/client": "workspace:",
+        "@perspective-dev/viewer-charts": "workspace:",
+        "@playwright/test": "catalog:",
         "microtime": "catalog:",
         "superstore-arrow": "catalog:",
         "zx": "catalog:"
     },
     "dependencies": {
+        "perspective-4-5-1": "npm:@perspective-dev/client@4.5.1",
+        "perspective-4-5-0": "npm:@perspective-dev/client@4.5.0",
+        "perspective-4-4-0": "npm:@perspective-dev/client@4.4.0",
+        "perspective-4-3-0": "npm:@perspective-dev/client@4.3.0",
         "perspective-4-2-0": "npm:@perspective-dev/client@4.2.0",
         "perspective-4-1-0": "npm:@perspective-dev/client@4.1.0",
         "perspective-4-0-0": "npm:@perspective-dev/client@4.0.0",

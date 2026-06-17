@@ -17,7 +17,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use indexmap::IndexMap;
 use perspective_client::proto::{ColumnType, HostedTable};
 use perspective_client::virtual_server::{
-    Features, ResultExt, VirtualDataSlice, VirtualServer, VirtualServerFuture, VirtualServerHandler,
+    Features, ResultExt, RowPathStyle, VirtualDataSlice, VirtualServer, VirtualServerFuture,
+    VirtualServerHandler,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{
@@ -402,6 +403,7 @@ impl PyVirtualDataSlice {
         PyVirtualDataSlice(Arc::new(Mutex::new(VirtualDataSlice::new(config))))
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub fn from_arrow_ipc(&self, ipc: &[u8]) -> PyResult<()> {
         self.0
             .lock()
@@ -414,7 +416,7 @@ impl PyVirtualDataSlice {
         self.0
             .lock()
             .unwrap()
-            .render_to_columns_json()
+            .render_to_columns_json(RowPathStyle::Sidecar)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 

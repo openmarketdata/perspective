@@ -11,12 +11,9 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import { RegularTableElement } from "regular-table";
-import {
-    get_psp_type,
-    type DatagridModel,
-    type PerspectiveViewerElement,
-} from "../types.js";
+import { get_psp_type, type DatagridModel } from "../types.js";
 import { CollectedHeaderRow } from "./types.js";
+import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
 
 /**
  * Apply selected column styling in response to column settings toggle events.
@@ -24,9 +21,9 @@ import { CollectedHeaderRow } from "./types.js";
  * the column settings panel.
  */
 export function style_selected_column(
-    this: DatagridModel,
+    model: DatagridModel,
     regularTable: RegularTableElement,
-    viewer: PerspectiveViewerElement,
+    viewer: HTMLPerspectiveViewerElement,
     selectedColumn: string | undefined,
 ): void {
     const group_header_trs = Array.from(
@@ -72,10 +69,13 @@ export function style_selected_column(
                 const open = title.textContent === selectedColumn;
                 title.classList.toggle("psp-menu-open", open);
                 editBtn.classList.toggle("psp-menu-open", open);
-                if (this._config.columns.length > 1) {
+                if (model._config.columns.length > 1) {
                     for (const r of regularTable.querySelectorAll("td")) {
                         const meta = regularTable.getMeta(r);
-                        if (!meta?.column_header) continue;
+                        if (!meta?.column_header) {
+                            continue;
+                        }
+
                         const isOpen =
                             meta.column_header[
                                 meta.column_header.length - 2
@@ -92,34 +92,35 @@ export function style_selected_column(
  * Style a single column header row.
  */
 export function styleColumnHeaderRow(
-    this: DatagridModel,
+    model: DatagridModel,
     headerRow: CollectedHeaderRow,
     regularTable: RegularTableElement,
     is_menu_row: boolean,
 ): void {
     const header_depth =
-        this._config.group_by.length -
-        (this._config.group_rollup_mode === "flat" ? 1 : 0);
+        model._config.group_by.length -
+        (model._config.group_rollup_mode === "flat" ? 1 : 0);
 
-    const selectedColumn = this._column_settings_selected_column;
+    const selectedColumn = model._column_settings_selected_column;
     for (const { element: td, metadata } of headerRow.cells) {
         if (
             !metadata ||
             metadata.type === "body" ||
             metadata.type === "row_header"
-        )
+        ) {
             continue;
+        }
 
         const column_name =
-            metadata.column_header?.[this._config.split_by.length];
+            metadata.column_header?.[model._config.split_by.length];
 
-        const sort = this._config.sort.find((x) => x[0] === column_name);
+        const sort = model._config.sort.find((x) => x[0] === column_name);
         const is_corner = typeof metadata.x === "undefined";
         const needs_border =
             (metadata.type === "corner" &&
                 metadata.row_header_x === header_depth) ||
             (!is_corner &&
-                (metadata.x + 1) % this._config.columns.length === 0);
+                (metadata.x + 1) % model._config.columns.length === 0);
 
         td.classList.toggle("psp-header-border", needs_border);
         td.classList.toggle("psp-header-group", false);
@@ -159,7 +160,7 @@ export function styleColumnHeaderRow(
             !is_menu_row && !!sort && sort[1] === "col desc abs",
         );
 
-        const type = get_psp_type(this, metadata);
+        const type = get_psp_type(model, metadata);
         const is_numeric = type === "integer" || type === "float";
         const is_string = type === "string";
         const is_date = type === "date";
@@ -171,13 +172,13 @@ export function styleColumnHeaderRow(
             "psp-menu-enabled",
             (is_string || is_numeric || is_date || is_datetime) &&
                 !is_corner &&
-                metadata.column_header_y === this._config.split_by.length + 1,
+                metadata.column_header_y === model._config.split_by.length + 1,
         );
         td.classList.toggle(
             "psp-sort-enabled",
             (is_string || is_numeric || is_date || is_datetime) &&
                 !is_corner &&
-                metadata.column_header_y === this._config.split_by.length,
+                metadata.column_header_y === model._config.split_by.length,
         );
         td.classList.toggle(
             "psp-is-width-override",
@@ -185,7 +186,7 @@ export function styleColumnHeaderRow(
         );
 
         // Apply menu-open for selected column
-        if (this._config.columns.length > 1 && selectedColumn) {
+        if (model._config.columns.length > 1 && selectedColumn) {
             const isOpen =
                 metadata.column_header?.[metadata.column_header.length - 2] ===
                 selectedColumn;
