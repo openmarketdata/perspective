@@ -67,13 +67,11 @@ test.describe("Examples", () => {
             let selector = "";
             if (new_config.plugin === "Datagrid") {
                 selector = "perspective-viewer-datagrid";
-            } else if (new_config.plugin === "Map Scatter") {
-                selector = "perspective-viewer-openlayers-scatter";
             } else {
                 const plugin = new_config.plugin
                     .replace(/[-\/\s]/gi, "")
                     .toLowerCase();
-                selector = `perspective-viewer-d3fc-${plugin}`;
+                selector = `perspective-viewer-charts-${plugin}`;
             }
 
             await compareSVGContentsToSnapshot(page, selector, [
@@ -95,7 +93,7 @@ test("test svgs", async ({ page }) => {
     const viewer = new PageView(page);
     await viewer.restore({ plugin: "X/Y Scatter" });
     const contents = await getSvgContentString(
-        "perspective-viewer-d3fc-xyscatter",
+        "perspective-viewer-charts-xyscatter",
     )(page);
     console.log(contents);
 });

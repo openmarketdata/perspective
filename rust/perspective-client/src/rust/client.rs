@@ -206,19 +206,6 @@ impl ReconnectCallback {
 /// An instance of a [`Client`] is a connection to a single
 /// `perspective_server::Server`, whether locally in-memory or remote over some
 /// transport like a WebSocket.
-///
-/// # Examples
-///
-/// Create a `perspective_server::Server` and a synchronous [`Client`] via the
-/// `perspective` crate:
-///
-/// ```rust
-/// use perspective::LocalClient;
-/// use perspective::server::Server;
-///
-/// let server = Server::default();
-/// let client = perspective::LocalClient::new(&server);
-/// ```
 #[derive(Clone)]
 pub struct Client {
     name: Arc<String>,
@@ -530,10 +517,13 @@ impl Client {
     ///
     /// Load a CSV from a `String`:
     ///
-    /// ```rust
+    /// ```no_run
+    /// # use perspective_client::*;
+    /// # async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let opts = TableInitOptions::default();
     /// let data = TableData::Update(UpdateData::Csv("x,y\n1,2\n3,4".into()));
     /// let table = client.table(data, opts).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn table(&self, input: TableData, options: TableInitOptions) -> ClientResult<Table> {
         let entity_id = match options.name.clone() {
@@ -628,6 +618,7 @@ impl Client {
             ClientResp::MakeJoinTableResp(_) => Ok(Table::new(entity_id, client, TableOptions {
                 index: Some(on.to_owned()),
                 limit: None,
+                page_to_disk: None,
             })),
             resp => Err(resp.into()),
         }
@@ -657,9 +648,13 @@ impl Client {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let tables = client.open_table("table_one").await;
-    /// ```  
+    /// ```no_run
+    /// # use perspective_client::Client;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!();
+    /// let table = client.open_table("table_one".to_owned()).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn open_table(&self, entity_id: String) -> ClientResult<Table> {
         let infos = self.get_table_infos().await?;
 
@@ -668,6 +663,9 @@ impl Client {
             let options = TableOptions {
                 index: info.index,
                 limit: info.limit,
+                // `page_to_disk` is a server-side property not surfaced in table
+                // info; it does not affect client-side behavior.
+                page_to_disk: None,
             };
 
             let client = self.clone();
@@ -689,8 +687,12 @@ impl Client {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let tables = client.get_hosted_table_names().await;
+    /// ```no_run
+    /// # use perspective_client::Client;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!();
+    /// let tables = client.get_hosted_table_names().await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_hosted_table_names(&self) -> ClientResult<Vec<String>> {
         let msg = Request {

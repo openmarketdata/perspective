@@ -12,7 +12,7 @@
 
 import "/node_modules/@perspective-dev/viewer/dist/cdn/perspective-viewer.js";
 import "/node_modules/@perspective-dev/viewer-datagrid/dist/cdn/perspective-viewer-datagrid.js";
-import "/node_modules/@perspective-dev/viewer-d3fc/dist/cdn/perspective-viewer-d3fc.js";
+import "/node_modules/@perspective-dev/viewer-charts/dist/cdn/perspective-viewer-charts.js";
 
 import perspective from "/node_modules/@perspective-dev/client/dist/cdn/perspective.js";
 
@@ -150,8 +150,6 @@ function set_runnable() {
     window.run.disabled = false;
 }
 
-const heatmap_plugin = await window.viewer.getPlugin("Heatmap");
-heatmap_plugin.max_cells = 100000;
 make_range(xmin, xmax, "X");
 make_range(ymin, ymax, "Y");
 window.resolution.addEventListener("input", set_runnable);

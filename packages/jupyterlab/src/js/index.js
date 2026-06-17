@@ -27,8 +27,7 @@ export * from "./view";
 export * from "./widget";
 
 import "@perspective-dev/viewer-datagrid";
-import "@perspective-dev/viewer-d3fc";
-import "@perspective-dev/viewer-openlayers";
+import "@perspective-dev/viewer-charts";
 
 // NOTE: only expose the widget here
 import { PerspectiveJupyterPlugin } from "./plugin";

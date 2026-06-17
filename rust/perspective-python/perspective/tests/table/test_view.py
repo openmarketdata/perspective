@@ -424,6 +424,151 @@ class TestView(object):
             {"__ROW_PATH__": ["a"], "y": 300 / 2},
         ]
 
+    def test_view_aggregate_gmv(self):
+        data = {
+            "division": [
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+                "D1",
+                "D2",
+            ],
+            "trading area": [
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+            ],
+            "symbol": [
+                "AAPL",
+                "GOOG",
+                "MSFT",
+                "AAPL",
+                "GOOG",
+                "MSFT",
+                "AAPL",
+                "GOOG",
+                "MSFT",
+                "AAPL",
+                "GOOG",
+                "MSFT",
+                "AAPL",
+                "GOOG",
+                "MSFT",
+                "AAPL",
+                "GOOG",
+                "MSFT",
+                "AAPL",
+                "GOOG",
+            ],
+            "MV": [
+                1500,
+                1200,
+                1300,
+                1400,
+                1600,
+                1100,
+                1700,
+                1800,
+                1900,
+                2000,
+                -2100,
+                -2200,
+                -2300,
+                -2400,
+                -2500,
+                -2600,
+                -2700,
+                -2800,
+                -2900,
+                -3000,
+            ],
+        }
+
+        tbl = Table(data)
+        view = tbl.view(
+            aggregates={"MV": "gmv"}, group_by=["division", "symbol"], columns=["MV"]
+        )
+
+        assert view.to_columns() == {
+            "__ROW_PATH__": [
+                [],
+                ["D1"],
+                ["D1", "AAPL"],
+                ["D1", "GOOG"],
+                ["D1", "MSFT"],
+                ["D2"],
+                ["D2", "AAPL"],
+                ["D2", "GOOG"],
+                ["D2", "MSFT"],
+            ],
+            "MV": [10000, 5900, -2000, -3200, 700, 7100, 800, -2400, -3900],
+        }
+
+    def test_view_aggregate_gmv_split_by(self):
+        data = {
+            "division": [
+                "D1", "D2", "D1", "D2", "D1", "D2", "D1", "D2", "D1", "D2",
+                "D1", "D2", "D1", "D2", "D1", "D2", "D1", "D2", "D1", "D2",
+            ],
+            "symbol": [
+                "AAPL", "GOOG", "MSFT", "AAPL", "GOOG", "MSFT", "AAPL",
+                "GOOG", "MSFT", "AAPL", "GOOG", "MSFT", "AAPL", "GOOG",
+                "MSFT", "AAPL", "GOOG", "MSFT", "AAPL", "GOOG",
+            ],
+            "MV": [
+                1500, 1200, 1300, 1400, 1600, 1100, 1700, 1800, 1900, 2000,
+                -2100, -2200, -2300, -2400, -2500, -2600, -2700, -2800,
+                -2900, -3000,
+            ],
+        }
+
+        tbl = Table(data)
+        view = tbl.view(
+            aggregates={"MV": "gmv"},
+            group_by=["division"],
+            split_by=["symbol"],
+            columns=["MV"],
+        )
+
+        assert view.to_columns() == {
+            "__ROW_PATH__": [[], ["D1"], ["D2"]],
+            "AAPL|MV": [2800, -2000, 800],
+            "GOOG|MV": [5600, -3200, -2400],
+            "MSFT|MV": [4600, 700, -3900],
+        }
+
     def test_view_aggregate_mean_from_schema(self):
         data = [
             {"a": "a", "x": 1, "y": 200},
@@ -453,6 +598,44 @@ class TestView(object):
         assert view.to_records() == [
             {"__ROW_PATH__": [], "y": (1.0 * 200 + 2 * 100) / (1.0 + 2)},
             {"__ROW_PATH__": ["a"], "y": (1.0 * 200 + 2 * 100) / (1.0 + 2)},
+        ]
+
+    def test_view_aggregate_weighted_mean_by_expression(self):
+        data = [
+            {"a": "a", "x": 1, "y": 200},
+            {"a": "a", "x": 2, "y": 100},
+            {"a": "a", "x": 3, "y": None},
+        ]
+        tbl = Table(data)
+        view = tbl.view(
+            aggregates={"y": ("weighted mean", ["z"])},
+            group_by=["a"],
+            columns=["y", "z"],
+            expressions={"z": '"x"'},
+        )
+
+        assert view.to_records() == [
+            {"__ROW_PATH__": [], "y": (1.0 * 200 + 2 * 100) / (1.0 + 2), "z": 6},
+            {"__ROW_PATH__": ["a"], "y": (1.0 * 200 + 2 * 100) / (1.0 + 2), "z": 6},
+        ]
+
+    def test_view_aggregate_weighted_mean_by_expression_without_column_ref(self):
+        data = [
+            {"a": "a", "x": 1, "y": 200},
+            {"a": "a", "x": 2, "y": 100},
+            {"a": "a", "x": 3, "y": None},
+        ]
+        tbl = Table(data)
+        view = tbl.view(
+            aggregates={"y": ("weighted mean", ["z"])},
+            group_by=["a"],
+            columns=["y"],
+            expressions={"z": '"x" + 1'},
+        )
+
+        assert view.to_records() == [
+            {"__ROW_PATH__": [], "y": (2 * 200 + 3 * 100) / (2 + 3)},
+            {"__ROW_PATH__": ["a"], "y": (2 * 200 + 3 * 100) / (2 + 3)},
         ]
 
     def test_view_aggregate_weighted_mean_with_negative_weights(self):

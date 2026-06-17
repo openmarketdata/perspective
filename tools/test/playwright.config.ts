@@ -16,6 +16,7 @@ import * as dotenv from "dotenv";
 import { createRequire } from "node:module";
 import url from "node:url";
 import { execSync } from "child_process";
+// @ts-ignore -- sh_perspective.mjs is plain JS without type declarations
 import { get_scope } from "../scripts/sh_perspective.mjs";
 
 const __filename = url.fileURLToPath(import.meta.url);
@@ -32,8 +33,8 @@ const TEST_SERVER_PORT = 6598;
 const RUN_JUPYTERLAB = !!process.env.PSP_JUPYTERLAB_TESTS;
 
 // TODO use this from core
-const package_venn = get_scope().reduce(
-    (acc, x) => {
+const package_venn = (get_scope() as string[]).reduce(
+    (acc: { include: string[]; exclude: string[] }, x: string) => {
         if (x.startsWith("!")) {
             acc.exclude.push(x);
         } else {
@@ -47,18 +48,26 @@ const package_venn = get_scope().reduce(
 
 let PACKAGE: string[] = [];
 if (package_venn.include.length === 0) {
-    PACKAGE = JSON.parse(execSync(`pnpm m ls --json --depth=-1`).toString())
-        .filter((x) => x.name !== undefined)
+    PACKAGE = (
+        JSON.parse(execSync(`pnpm m ls --json --depth=-1`).toString()) as {
+            name?: string;
+        }[]
+    )
+        .filter((x): x is { name: string } => x.name !== undefined)
         .map((x) => x.name.replace("@perspective-dev/", ""))
-        .filter((x) => package_venn.exclude.indexOf(`!${x}`) === -1);
+        .filter((x: string) => package_venn.exclude.indexOf(`!${x}`) === -1);
 } else {
     PACKAGE = package_venn.include.filter(
-        (x) => package_venn.exclude.indexOf(`!${x}`) === -1,
+        (x: string) => package_venn.exclude.indexOf(`!${x}`) === -1,
     );
 }
 
 const DEVICE_OPTIONS = {
     "Desktop Chrome": {
+        // Lock DPR to 1 so WebGL viewport / canvas backing sizes are
+        // identical across host machines (matters for pixel snapshots).
+        // This also overrides the `devices["Desktop Chrome"]` default of 2.
+        deviceScaleFactor: 1,
         launchOptions: {
             args: [
                 // "--disable-accelerated-2d-canvas",
@@ -71,6 +80,13 @@ const DEVICE_OPTIONS = {
                 "--proxy-bypass-list=*",
                 "--js-flags=--expose-gc",
                 "--enable-precise-memory-info",
+                // Use the software WebGL backend so GPU/driver differences
+                // between machines don't leak into snapshot pixels. The
+                // 2× perf hit is under budget for the test suite.
+                "--use-gl=swiftshader",
+                "--use-angle=swiftshader",
+                "--force-color-profile=srgb",
+                "--disable-lcd-text",
             ],
         },
     },
@@ -90,12 +106,8 @@ const BROWSER_PACKAGES = [
         testDir: "packages/viewer-datagrid/test/js",
     },
     {
-        packageName: "viewer-d3fc",
-        testDir: "packages/viewer-d3fc/test/js",
-    },
-    {
-        packageName: "viewer-openlayers",
-        testDir: "packages/viewer-openlayers/test/js",
+        packageName: "viewer-charts",
+        testDir: "packages/viewer-charts/test/ts",
     },
     {
         packageName: "jupyterlab",
@@ -129,11 +141,17 @@ const BROWSER_AND_PYTHON_PACKAGES = [
     },
 ];
 
+type ProjectConfig = NonNullable<
+    Parameters<typeof defineConfig>[0]["projects"]
+>[number];
+
 let PROJECTS = (() => {
-    const acc = new Array();
+    const acc: ProjectConfig[] = [];
     if (RUN_JUPYTERLAB) {
         for (const pkg of BROWSER_AND_PYTHON_PACKAGES) {
-            for (const device of Object.keys(DEVICE_OPTIONS)) {
+            for (const device of Object.keys(
+                DEVICE_OPTIONS,
+            ) as (keyof typeof DEVICE_OPTIONS)[]) {
                 acc.push({
                     name: `${pkg.packageName}-${device
                         .toLowerCase()
@@ -162,7 +180,9 @@ let PROJECTS = (() => {
 
         for (const pkg of BROWSER_PACKAGES) {
             if (PACKAGE == undefined || PACKAGE.includes(pkg.packageName)) {
-                for (const device of Object.keys(DEVICE_OPTIONS)) {
+                for (const device of Object.keys(
+                    DEVICE_OPTIONS,
+                ) as (keyof typeof DEVICE_OPTIONS)[]) {
                     acc.push({
                         name: `${pkg.packageName}-${device
                             .toLowerCase()
@@ -174,7 +194,7 @@ let PROJECTS = (() => {
                             baseURL: `http://localhost:${TEST_SERVER_PORT}`,
                             timezoneId: "UTC",
                         },
-                    } as any);
+                    });
                 }
             }
         }

@@ -175,7 +175,7 @@ PERSPECTIVE_EXPORT ESM_EXPORT("psp_heap_size") extern "C" size_t
     {                                                                          \
         std::stringstream __SS__;                                              \
         __SS__ << (X) << "\n";                                                 \
-        __SS__ << psp_stack_trace();                                           \
+        __SS__ << perspective::psp_stack_trace();                                           \
         std::cout << __SS__.str() << '\n';                                     \
         perspective::psp_abort(__SS__.str());                                  \
     }
@@ -293,7 +293,8 @@ enum t_aggtype {
     AGGTYPE_PCT_SUM_PARENT,
     AGGTYPE_PCT_SUM_GRAND_TOTAL,
     AGGTYPE_VARIANCE,
-    AGGTYPE_STANDARD_DEVIATION
+    AGGTYPE_STANDARD_DEVIATION,
+    AGGTYPE_GMV
 };
 
 PERSPECTIVE_EXPORT t_aggtype str_to_aggtype(const std::string& str);

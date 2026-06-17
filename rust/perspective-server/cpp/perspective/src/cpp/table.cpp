@@ -39,7 +39,8 @@ Table::Table(
     std::vector<std::string> column_names,
     std::vector<t_dtype> data_types,
     std::uint32_t limit,
-    std::string index
+    std::string index,
+    t_backing_store backing_store
 ) :
     m_init(false),
     m_id(GLOBAL_TABLE_ID++),
@@ -49,7 +50,8 @@ Table::Table(
     m_offset(0),
     m_limit(limit),
     m_index(std::move(index)),
-    m_gnode_set(false) {
+    m_gnode_set(false),
+    m_backing_store(backing_store) {
 
     validate_columns(m_column_names);
 }
@@ -79,6 +81,28 @@ Table::init(
 
     PSP_VERBOSE_ASSERT(m_gnode_set, "gnode is not set!");
     m_pool->send(m_gnode->get_id(), port_id, data_table);
+
+    m_init = true;
+}
+
+void
+Table::init_bulk(
+    const std::shared_ptr<t_data_table>& data_table,
+    std::uint32_t row_count
+) {
+    PSP_VERBOSE_ASSERT(
+        !m_gnode_set,
+        "`init_bulk` can only be used for the initial load of a `Table`."
+    );
+
+    process_op_column(*data_table, t_op::OP_INSERT);
+    calculate_offset(row_count);
+
+    auto new_gnode = make_gnode(data_table->get_schema());
+    set_gnode(new_gnode);
+    m_pool->register_gnode(m_gnode.get());
+
+    m_gnode->init_bulk(data_table);
 
     m_init = true;
 }
@@ -184,7 +208,8 @@ Table::validate_expressions(
 std::shared_ptr<t_gnode>
 Table::make_gnode(const t_schema& in_schema) {
     t_schema out_schema = in_schema.drop({"psp_pkey", "psp_op"});
-    auto gnode = std::make_shared<t_gnode>(in_schema, out_schema);
+    auto gnode =
+        std::make_shared<t_gnode>(in_schema, out_schema, m_backing_store);
     gnode->init();
     return gnode;
 }
@@ -278,6 +303,11 @@ Table::get_limit() const {
     return m_limit;
 }
 
+t_backing_store
+Table::get_backing_store() const {
+    return m_backing_store;
+}
+
 void
 Table::set_column_names(const std::vector<std::string>& column_names) {
     validate_columns(column_names);
@@ -360,7 +390,10 @@ Table::update_csv(const std::string_view& data, std::uint32_t port_id) {
 
 std::shared_ptr<Table>
 Table::from_csv(
-    const std::string& index, std::string&& data, std::uint32_t limit
+    const std::string& index,
+    std::string&& data,
+    std::uint32_t limit,
+    t_backing_store backing_store
 ) {
     auto map =
         std::unordered_map<std::string, std::shared_ptr<arrow::DataType>>();
@@ -368,16 +401,19 @@ Table::from_csv(
     apachearrow::ArrowLoader arrow_loader;
     arrow_loader.init_csv(data, false, map);
 
-    std::vector<std::string> column_names;
-    std::vector<t_dtype> data_types;
+    // Arrow has materialized the CSV into its own buffers at this point; drop
+    // the raw CSV string so it does not live concurrently with the Arrow table
+    // and the `t_data_table`.
+    { auto _ = std::move(data); }
 
-    column_names = arrow_loader.names();
-    data_types = arrow_loader.types();
+    std::vector<std::string> column_names = arrow_loader.names();
+    std::vector<t_dtype> data_types = arrow_loader.types();
     t_schema input_schema(column_names, data_types);
     auto implicit_index_it =
         std::find(column_names.begin(), column_names.end(), "__INDEX__");
+    const bool has_index_column = implicit_index_it != column_names.end();
 
-    if (implicit_index_it != column_names.end()) {
+    if (has_index_column) {
         auto idx = std::distance(column_names.begin(), implicit_index_it);
         // position of the column is at the same index in both vectors
         column_names.erase(column_names.begin() + idx);
@@ -385,26 +421,35 @@ Table::from_csv(
     }
 
     t_schema output_schema(column_names, data_types);
-    std::uint32_t row_count = 0;
-    row_count = arrow_loader.row_count();
+    std::uint32_t row_count = arrow_loader.row_count();
 
     auto data_table = std::make_shared<t_data_table>(output_schema);
     data_table->init();
 
     {
-        auto _ = std::move(data);
         auto loader = std::move(arrow_loader);
         data_table->extend(row_count);
         loader.fill_table(*data_table, input_schema, index, 0, false);
     }
+
     auto pool = std::make_shared<t_pool>();
     pool->init();
-    auto tbl =
-        std::make_shared<Table>(pool, column_names, data_types, limit, index);
+    auto tbl = std::make_shared<Table>(
+        pool, column_names, data_types, limit, index, backing_store
+    );
 
-    tbl->init(*data_table, row_count, t_op::OP_INSERT, 0);
-    data_table.reset();
-    pool->_process();
+    // `psp_pkey` is guaranteed unique only when the index is implicit (a
+    // generated row-number). Explicit indexes or `__INDEX__` columns can
+    // contain duplicates, which must be deduplicated via the `flatten()`
+    // path.
+    const bool can_bulk_init = index.empty() && !has_index_column;
+    if (can_bulk_init) {
+        tbl->init_bulk(data_table, row_count);
+    } else {
+        tbl->init(*data_table, row_count, t_op::OP_INSERT, 0);
+        data_table.reset();
+        pool->_process();
+    }
     return tbl;
 }
 
@@ -996,7 +1041,10 @@ Table::update_cols(const std::string_view& data, std::uint32_t port_id) {
 
 std::shared_ptr<Table>
 Table::from_cols(
-    const std::string& index, std::string&& data, std::uint32_t limit
+    const std::string& index,
+    std::string&& data,
+    std::uint32_t limit,
+    t_backing_store backing_store
 ) {
     // 1.) Infer schema
     rapidjson::Document document;
@@ -1103,7 +1151,7 @@ Table::from_cols(
     auto pool = std::make_shared<t_pool>();
     pool->init();
     auto tbl = std::make_shared<Table>(
-        pool, schema.columns(), schema.types(), limit, index
+        pool, schema.columns(), schema.types(), limit, index, backing_store
     );
 
     tbl->init(*data_table, nrows, t_op::OP_INSERT, 0);
@@ -1216,7 +1264,10 @@ Table::update_rows(const std::string_view& data, std::uint32_t port_id) {
 
 std::shared_ptr<Table>
 Table::from_rows(
-    const std::string& index, std::string&& data, std::uint32_t limit
+    const std::string& index,
+    std::string&& data,
+    std::uint32_t limit,
+    t_backing_store backing_store
 ) {
     // 1.) Infer schema
     rapidjson::Document document;
@@ -1338,7 +1389,7 @@ Table::from_rows(
     auto pool = std::make_shared<t_pool>();
     pool->init();
     auto tbl = std::make_shared<Table>(
-        pool, schema.columns(), schema.types(), limit, index
+        pool, schema.columns(), schema.types(), limit, index, backing_store
     );
 
     tbl->init(*data_table, document.Size(), t_op::OP_INSERT, 0);
@@ -1457,7 +1508,10 @@ Table::update_ndjson(const std::string_view& data, std::uint32_t port_id) {
 
 std::shared_ptr<Table>
 Table::from_ndjson(
-    const std::string& index, std::string&& data, std::uint32_t limit
+    const std::string& index,
+    std::string&& data,
+    std::uint32_t limit,
+    t_backing_store backing_store
 ) {
     // 1.) Infer schema
     rapidjson::Document document;
@@ -1592,7 +1646,7 @@ Table::from_ndjson(
     auto pool = std::make_shared<t_pool>();
     pool->init();
     auto tbl = std::make_shared<Table>(
-        pool, schema.columns(), schema.types(), limit, index
+        pool, schema.columns(), schema.types(), limit, index, backing_store
     );
 
     tbl->init(*data_table, ii, t_op::OP_INSERT, 0);
@@ -1603,7 +1657,10 @@ Table::from_ndjson(
 
 std::shared_ptr<Table>
 Table::from_schema(
-    const std::string& index, const t_schema& schema, std::uint32_t limit
+    const std::string& index,
+    const t_schema& schema,
+    std::uint32_t limit,
+    t_backing_store backing_store
 ) {
     auto pool = std::make_shared<t_pool>();
     pool->init();
@@ -1628,7 +1685,7 @@ Table::from_schema(
     }
 
     auto tbl = std::make_shared<Table>(
-        pool, schema.columns(), schema.types(), limit, index
+        pool, schema.columns(), schema.types(), limit, index, backing_store
     );
 
     tbl->init(data_table, 0, t_op::OP_INSERT, 0);
@@ -1670,7 +1727,10 @@ Table::update_arrow(const std::string_view& data, std::uint32_t port_id) {
 
 std::shared_ptr<Table>
 Table::from_arrow(
-    const std::string& index, std::string&& data, std::uint32_t limit
+    const std::string& index,
+    std::string&& data,
+    std::uint32_t limit,
+    t_backing_store backing_store
 ) {
     apachearrow::ArrowLoader arrow_loader;
 
@@ -1711,7 +1771,8 @@ Table::from_arrow(
     // Make Table
     auto pool = std::make_shared<t_pool>();
     pool->init();
-    auto table = std::make_shared<Table>(pool, columns, types, limit, index);
+    auto table =
+        std::make_shared<Table>(pool, columns, types, limit, index, backing_store);
     table->init(*data_table, data_table->num_rows(), t_op::OP_INSERT, 0);
     data_table.reset();
     pool->_process();
@@ -1724,7 +1785,8 @@ Table::make_table(
     const std::vector<t_dtype>& data_types,
     std::uint32_t limit,
     const std::string& index,
-    const std::string_view& data
+    const std::string_view& data,
+    t_backing_store backing_store
 ) {
     auto pool = std::make_shared<t_pool>();
     pool->init();
@@ -1748,7 +1810,9 @@ Table::make_table(
     }
     auto columns = data_table.get_schema().columns();
     auto dtypes = data_table.get_schema().types();
-    auto table = std::make_shared<Table>(pool, columns, dtypes, limit, index);
+    auto table = std::make_shared<Table>(
+        pool, columns, dtypes, limit, index, backing_store
+    );
     table->init(data_table, data_table.num_rows(), t_op::OP_INSERT, 0);
     pool->_process();
     return table;

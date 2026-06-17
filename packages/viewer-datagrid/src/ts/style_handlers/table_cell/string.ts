@@ -10,10 +10,13 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-import chroma from "chroma-js";
 import {
-    rgbaToRgb,
+    hslToRgb,
     infer_foreground_from_background,
+    parseColor,
+    rgbaToRgb,
+    rgbToHex,
+    rgbToHsl,
 } from "../../color_utils.js";
 import type { DatagridModel, ColumnConfig, ColorRecord } from "../../types.js";
 
@@ -28,17 +31,17 @@ interface PluginWithColor extends Omit<ColumnConfig, "color"> {
 }
 
 export function cell_style_string(
-    this: DatagridModel,
+    model: DatagridModel,
     plugin: PluginWithColor | undefined,
     td: HTMLElement,
     metadata: CellMetaWithExtras,
 ): void {
-    const column_name = metadata.column_header?.[this._config.split_by.length];
+    const column_name = metadata.column_header?.[model._config.split_by.length];
     const colorRecord: ColorRecord = (() => {
         if (plugin?.color !== undefined) {
             return plugin.color;
         } else {
-            return this._color;
+            return model._color;
         }
     })();
 
@@ -60,7 +63,7 @@ export function cell_style_string(
         plugin?.string_color_mode === "background" &&
         metadata.user !== null
     ) {
-        const source = this._plugin_background as [number, number, number];
+        const source = model._plugin_background as [number, number, number];
         const foreground = infer_foreground_from_background(
             rgbaToRgb([r, g, b, 1], source),
         );
@@ -71,25 +74,24 @@ export function cell_style_string(
         metadata.user !== null &&
         column_name
     ) {
-        if (!this._series_color_map.has(column_name)) {
-            this._series_color_map.set(column_name, new Map());
-            this._series_color_seed.set(column_name, 0);
+        if (!model._series_color_map.has(column_name)) {
+            model._series_color_map.set(column_name, new Map());
+            model._series_color_seed.set(column_name, 0);
         }
 
-        const series_map = this._series_color_map.get(column_name)!;
+        const series_map = model._series_color_map.get(column_name)!;
         if (metadata.user && !series_map.has(metadata.user)) {
-            const seed = this._series_color_seed.get(column_name) ?? 0;
+            const seed = model._series_color_seed.get(column_name) ?? 0;
             series_map.set(metadata.user, seed);
-            this._series_color_seed.set(column_name, seed + 1);
+            model._series_color_seed.set(column_name, seed + 1);
         }
 
         const color_seed = series_map.get(metadata.user!) ?? 0;
-        let [h, s, l] = chroma(hex).hsl();
-        h = h + ((color_seed * 150) % 360);
-        const color2 = chroma(h, s, l, "hsl");
-        const [r2, g2, b2] = color2.rgb();
-        const hex2 = color2.hex();
-        const source = this._plugin_background as [number, number, number];
+        const [h, s, l] = rgbToHsl(parseColor(hex));
+        const rotated = hslToRgb([h + ((color_seed * 150) % 360), s, l]);
+        const [r2, g2, b2] = rotated;
+        const hex2 = rgbToHex(rotated);
+        const source = model._plugin_background as [number, number, number];
         const foreground = infer_foreground_from_background(
             rgbaToRgb([r2, g2, b2, 1], source),
         );

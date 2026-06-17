@@ -15,19 +15,22 @@ import { activate } from "../plugin/activate.js";
 import { restore } from "../plugin/restore.js";
 import { save } from "../plugin/save.js";
 import { draw } from "../plugin/draw.js";
-import column_style_controls, {
-    ColumnStyleOpts,
-} from "../plugin/column_style_controls.js";
+import column_config_schema, {
+    ColumnConfigSchema,
+} from "../plugin/column_config_schema.js";
 import datagridStyles from "../../../dist/css/perspective-viewer-datagrid.css";
 import { format_raw } from "../data_listener/format_cell.js";
+import { sourceColumn } from "@perspective-dev/viewer/src/ts/column-format.js";
 
 import type { View, ViewWindow } from "@perspective-dev/client";
-import type { IPerspectiveViewerPlugin } from "@perspective-dev/viewer";
+import type {
+    IPerspectiveViewerPlugin,
+    PluginStaticConfig,
+} from "@perspective-dev/viewer";
 import type {
     DatagridModel,
     DatagridToolbarElement,
     EditMode,
-    PerspectiveViewerElement,
     DatagridPluginConfig,
     ColumnsConfig,
 } from "../types.js";
@@ -113,44 +116,64 @@ export class HTMLPerspectiveViewerDatagridPluginElement
         return await activate.call(this, view);
     }
 
-    get name(): string {
-        return "Datagrid";
+    get_static_config(): PluginStaticConfig {
+        return {
+            name: "Datagrid",
+            category: "Basic",
+            select_mode: "toggle",
+            config_column_names: ["Columns"],
+            group_rollup_modes: ["rollup", "flat", "total"],
+            // Higher priority than the chart plugins so the Datagrid is
+            // loaded by default.
+            priority: 1,
+            can_render_column_styles: true,
+        };
     }
 
-    get category(): string {
-        return "Basic";
+    plugin_config_schema(): ColumnConfigSchema {
+        const fields = [];
+        fields.push({
+            kind: "Enum",
+            key: "edit_mode",
+            default: "READ_ONLY",
+            variants: [
+                { value: "EDIT", label: "Edit" },
+                { value: "READ_ONLY", label: "Read-only" },
+                { value: "SELECT_ROW", label: "Row Select" },
+                { value: "SELECT_COLUMN", label: "Column Select" },
+                { value: "SELECT_REGION", label: "Region Select" },
+                { value: "SELECT_ROW_TREE", label: "Tree Select" },
+            ],
+        });
+
+        fields.push({
+            kind: "Bool",
+            key: "scroll_lock",
+            default: false,
+        });
+
+        return {
+            fields,
+        };
     }
 
-    get select_mode(): string {
-        return "toggle";
-    }
-
-    get min_config_columns(): number | undefined {
-        return undefined;
-    }
-
-    get config_column_names(): string[] {
-        return ["Columns"];
-    }
-
-    get group_rollups(): string[] {
-        return ["rollup", "flat", "total"];
-    }
-
-    /**
-     * Give the Datagrid a higher priority so it is loaded
-     * over the default charts by default.
-     */
-    get priority(): number {
-        return 1;
-    }
-
-    can_render_column_styles(type: string, _group: string): boolean {
-        return type !== "boolean";
-    }
-
-    column_style_controls(type: string, group: string): ColumnStyleOpts {
-        return column_style_controls.call(this, type as any, group);
+    column_config_schema(
+        type: string,
+        group: string | undefined,
+        column_name: string,
+        current_value: Record<string, unknown> | null,
+        viewer_config?: { group_by?: string[]; group_rollup_mode?: string },
+        column_stats?: { abs_max: number },
+    ): ColumnConfigSchema {
+        return column_config_schema.call(
+            this,
+            type as any,
+            group,
+            column_name,
+            current_value,
+            viewer_config,
+            column_stats,
+        );
     }
 
     async draw(view: View): Promise<void> {
@@ -170,9 +193,7 @@ export class HTMLPerspectiveViewerDatagridPluginElement
         }
     }
 
-    async render(viewport?: ViewWindow): Promise<string> {
-        const viewer = this.parentElement as PerspectiveViewerElement;
-        const view = await viewer.getView();
+    async render(view: View, viewport?: ViewWindow): Promise<string> {
         const json = await view.to_columns(viewport as any);
         const cols = await view.column_paths(viewport as any);
 
@@ -192,7 +213,7 @@ export class HTMLPerspectiveViewerDatagridPluginElement
                 const pluginConfig = (this.regular_table as any)[
                     PRIVATE_PLUGIN_SYMBOL
                 ] as ColumnsConfig | undefined;
-                const columnName = col_name.split("|").at(-1)!;
+                const columnName = sourceColumn(col_name);
                 const formatter = format_raw(
                     type,
                     pluginConfig?.[columnName] || {},
@@ -204,13 +225,14 @@ export class HTMLPerspectiveViewerDatagridPluginElement
                     out += col[ridx] + "\t";
                 }
             }
+
             out += "\n";
         }
 
         return out.trim();
     }
 
-    async resize(): Promise<void> {
+    async resize(_view: View): Promise<void> {
         if (!this.isConnected || this.offsetParent == null) {
             return;
         }
@@ -225,25 +247,17 @@ export class HTMLPerspectiveViewerDatagridPluginElement
         this.regular_table.clear();
     }
 
-    async save(): Promise<any> {
+    save(): any {
         return save.call(this);
     }
 
-    async restore(
-        token: DatagridPluginConfig,
-        columns_config?: ColumnsConfig,
-    ): Promise<any> {
+    restore(token: DatagridPluginConfig, columns_config?: ColumnsConfig): void {
         return restore.call(this, token, columns_config ?? {});
     }
 
-    async restyle(): Promise<void> {
-        // Get view from model if available, otherwise no-op
-        if (this.model?._view) {
-            await this.draw(this.model._view);
-        }
-    }
+    restyle() {}
 
-    async delete(): Promise<void> {
+    delete(): void {
         this.disconnectedCallback();
         this._toolbar = undefined;
         if ((this.regular_table as any).table_model) {

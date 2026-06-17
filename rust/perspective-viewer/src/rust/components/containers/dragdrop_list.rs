@@ -22,7 +22,7 @@ use yew::prelude::*;
 use crate::components::column_dropdown::ColumnDropDownElement;
 use crate::components::column_selector::{EmptyColumn, InPlaceColumn, InvalidColumn};
 use crate::components::type_icon::TypeIcon;
-use crate::dragdrop::*;
+use crate::presentation::{DragDropContainer, Presentation};
 use crate::utils::DragTarget;
 
 #[derive(Properties, Derivative)]
@@ -35,7 +35,7 @@ where
 {
     pub parent: Scope<T>,
 
-    pub dragdrop: DragDrop,
+    pub presentation: Presentation,
     pub name: &'static str,
     pub column_dropdown: ColumnDropDownElement,
     pub exclude: HashSet<String>,
@@ -185,13 +185,19 @@ where
         );
 
         let drop = Callback::from({
-            let dragdrop = ctx.props().dragdrop.clone();
+            let presentation = ctx.props().presentation.clone();
             let link = ctx.link().clone();
             move |event| {
                 link.send_message(DragDropListMsg::Freeze(false));
-                dragdrop.notify_drop(&event);
+                presentation.notify_drop(&event);
             }
         });
+
+        // Held by per-row `ondragenter` closures below so they can re-arm
+        // the `safaridragleave` flag on the container element when the
+        // row stops dragenter from bubbling. See the comment inside the
+        // closure for why this matters.
+        let container_noderef = drag_container.noderef.clone();
 
         let invalid_drag: bool;
         let mut valid_duplicate_drag = false;
@@ -210,7 +216,7 @@ where
                 let is_append = index == columns.len();
                 let is_self_move = ctx
                     .props()
-                    .dragdrop
+                    .presentation
                     .get_drag_target()
                     .map(|x| V::is_self_move(x))
                     .unwrap_or_default();
@@ -253,9 +259,30 @@ where
                     let close = ctx.props().parent.callback(move |_| V::close(idx));
                     let dragenter = ctx.props().parent.callback({
                         let link = ctx.link().clone();
+                        let container_noderef = container_noderef.clone();
                         move |event: DragEvent| {
                             event.stop_propagation();
                             event.prevent_default();
+                            // Safari: `relatedTarget` is always null on
+                            // dragleave, so `dragleave_helper` uses a
+                            // `data-safaridragleave` flag set by the
+                            // container's own dragenter to distinguish
+                            // child-crossing leaves (consume the flag)
+                            // from real leaves (no flag → fire callback).
+                            // The `stop_propagation` above blocks the
+                            // container's dragenter, so the flag would
+                            // never be re-armed after the first consume —
+                            // any further internal boundary crossing
+                            // would demote the state out of
+                            // `DragOverInProgress` and the next drop
+                            // would be silently rejected. Set the flag
+                            // here so each row-targeted dragenter
+                            // refills the pool.
+                            if event.related_target().is_none()
+                                && let Some(elem) = container_noderef.cast::<HtmlElement>()
+                            {
+                                let _ = elem.dataset().set("safaridragleave", "true");
+                            }
                             link.send_message(DragDropListMsg::Freeze(true));
                             V::dragenter(idx)
                         }

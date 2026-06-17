@@ -10,10 +10,10 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-import sh from "./sh.mjs";
 import inquirer from "inquirer";
 import fs from "fs";
 import * as dotenv from "dotenv";
+import { execSync } from "child_process";
 
 const original = dotenv.config({
     path: "./.perspectiverc",
@@ -50,7 +50,7 @@ const CONFIG = new Proxy(
         write() {
             fs.writeFileSync("./.perspectiverc", this.config.join("\n"));
             if (process.env.PSP_BUILD_IMMEDIATELY || process.env.PSP_ONCE) {
-                sh`node tools/scripts/build.mjs`.runSync();
+                execSync("node tools/scripts/build.mjs", { stdio: "inherit" });
                 if (process.env.PSP_ONCE) {
                     while (this.config.length > 0) {
                         this.config.pop();
@@ -169,19 +169,14 @@ async function focus_package() {
             value: "viewer-datagrid",
         },
         {
-            key: "d",
-            name: "@perspective-dev/viewer-d3fc",
-            value: "viewer-d3fc",
+            key: "g",
+            name: "@perspective-dev/viewer-charts",
+            value: "viewer-charts",
         },
         {
             key: "i",
             name: "@perspective-dev/jupyterlab",
             value: "jupyterlab",
-        },
-        {
-            key: "o",
-            name: "@perspective-dev/viewer-openlayers",
-            value: "viewer-openlayers",
         },
         {
             key: "w",

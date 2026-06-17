@@ -10,9 +10,8 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-import chroma from "chroma-js";
 import { createDataListener } from "../data_listener/index.js";
-import { blend, make_color_record } from "../color_utils.js";
+import { blend, make_color_record, parseColor } from "../color_utils.js";
 import type {
     ColumnType,
     Table,
@@ -26,10 +25,42 @@ import {
     type Schema,
     type ElemFactory,
     type EditMode,
-    type PerspectiveViewerElement,
-    get_psp_type,
 } from "../types.js";
-import { CellMetadata } from "regular-table/dist/esm/types.js";
+import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
+
+function arraysChanged<T>(a: T[], b: T[]): boolean {
+    if (a.length !== b.length) {
+        return true;
+    }
+
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function nestedArraysChanged<T>(a: T[][], b: T[][]): boolean {
+    if (a.length !== b.length) {
+        return true;
+    }
+
+    for (let i = 0; i < a.length; i++) {
+        if (a[i].length !== b[i].length) {
+            return true;
+        }
+
+        for (let j = 0; j < a[i].length; j++) {
+            if (a[i][j] !== b[i][j]) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
 
 function get_rule(regular: HTMLElement, tag: string, def: string): string {
     const color = window.getComputedStyle(regular).getPropertyValue(tag).trim();
@@ -59,6 +90,7 @@ class ElemFactoryImpl implements ElemFactory {
         if (!this._elements[this._index]) {
             this._elements[this._index] = document.createElement(this._name);
         }
+
         const elem = this._elements[this._index];
         this._index += 1;
         return elem;
@@ -70,61 +102,33 @@ export async function createModel(
     regular: RegularTable,
     table: Table,
     view: View,
+    theme: string,
     extend: Partial<DatagridModel> = {},
 ): Promise<DatagridModel> {
     const config = (await view.get_config()) as ViewConfig;
     if (this?.model?._config) {
         const old = this.model._config;
-        let group_by_changed = old.group_by.length !== config.group_by.length;
+        const group_by_changed = arraysChanged(old.group_by, config.group_by);
         const type_changed =
             (old.group_by.length === 0 || config.group_by.length === 0) &&
             group_by_changed;
 
-        if (!group_by_changed) {
-            for (const lvl in old.group_by) {
-                group_by_changed ||= config.group_by[lvl] !== old.group_by[lvl];
-            }
-        }
+        const split_by_changed = arraysChanged(old.split_by, config.split_by);
+        const columns_changed = arraysChanged(old.columns, config.columns);
+        const filter_changed = nestedArraysChanged(
+            old.filter as unknown[][],
+            config.filter as unknown[][],
+        );
 
-        let split_by_changed = old.split_by.length !== config.split_by.length;
-        if (!split_by_changed) {
-            for (const lvl in old.split_by) {
-                split_by_changed ||= config.split_by[lvl] !== old.split_by[lvl];
-            }
-        }
-
-        let columns_changed = old.columns.length !== config.columns.length;
-        if (!columns_changed) {
-            for (const lvl in old.columns) {
-                columns_changed ||= config.columns[lvl] !== old.columns[lvl];
-            }
-        }
-
-        let filter_changed = old.filter.length !== config.filter.length;
-        if (!filter_changed) {
-            for (const lvl in old.filter) {
-                for (const i in config.filter[lvl]) {
-                    filter_changed ||=
-                        config.filter[lvl][i as unknown as number] !==
-                        old.filter[lvl][i as unknown as number];
-                }
-            }
-        }
-
-        let sort_changed = old.sort.length !== config.sort.length;
-        if (!sort_changed) {
-            for (const lvl in old.sort) {
-                for (const i in config.sort[lvl]) {
-                    sort_changed ||=
-                        config.sort[lvl][i as unknown as number] !==
-                        old.sort[lvl][i as unknown as number];
-                }
-            }
-        }
+        const sort_changed = nestedArraysChanged(
+            old.sort as unknown[][],
+            config.sort as unknown[][],
+        );
 
         const group_rollup_mode_changed =
             old.group_rollup_mode !== config.group_rollup_mode;
 
+        const theme_changed = this.model._theme !== theme;
         this._reset_scroll_top = group_by_changed;
         this._reset_scroll_left = split_by_changed;
         this._reset_select =
@@ -139,6 +143,7 @@ export async function createModel(
             split_by_changed ||
             group_by_changed ||
             columns_changed ||
+            theme_changed ||
             type_changed;
     }
 
@@ -148,12 +153,12 @@ export async function createModel(
             view.num_rows(),
             view.schema(),
             view.expression_schema(),
-            (this.parentElement as PerspectiveViewerElement).getEditPort(),
+            (this.parentElement as HTMLPerspectiveViewerElement).getEditPort(),
         ]);
 
-    const _plugin_background = chroma(
+    const _plugin_background = parseColor(
         get_rule(regular, "--psp--background-color", "#FFFFFF"),
-    ).rgb();
+    );
 
     const _pos_fg_color = make_color_record(
         get_rule(regular, "--psp-datagrid--pos-cell--color", "#338DCD"),
@@ -187,10 +192,17 @@ export async function createModel(
     const _column_paths: string[] = [];
     const _is_editable: boolean[] = [];
     const _column_types: ColumnType[] = [];
+    let _edit_mode: EditMode = this._edit_mode || "READ_ONLY";
 
-    const _edit_mode: EditMode = this._edit_mode || "READ_ONLY";
+    if (
+        _edit_mode === "SELECT_ROW_TREE" &&
+        (config.group_by.length === 0 || config.group_rollup_mode === "flat")
+    ) {
+        _edit_mode = "READ_ONLY";
+        this._edit_mode = _edit_mode;
+    }
+
     this._edit_button!.dataset.editMode = _edit_mode;
-
     const model: DatagridModel = Object.assign(extend, {
         _edit_port,
         _view: view,
@@ -208,6 +220,7 @@ export async function createModel(
         _neg_bg_color,
         _column_paths,
         _column_types,
+        _theme: theme,
         _is_editable,
         _edit_mode,
         _selection_state: {
@@ -219,15 +232,15 @@ export async function createModel(
         }),
         _series_color_map: new Map<string, string>(),
         _series_color_seed: new Map<string, number>(),
+
         // get_psp_type,
         _div_factory: extend._div_factory || new ElemFactoryImpl("div"),
     }) as DatagridModel;
 
     regular.setDataListener(
-        createDataListener(this.parentElement as PerspectiveViewerElement).bind(
-            model,
-            regular,
-        ) as any,
+        createDataListener(
+            this.parentElement as HTMLPerspectiveViewerElement,
+        ).bind(model, regular) as any,
         {
             virtual_mode: (window
                 .getComputedStyle(regular)

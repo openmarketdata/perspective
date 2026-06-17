@@ -88,6 +88,12 @@ impl View {
         self.clone()
     }
 
+    #[wasm_bindgen]
+    #[doc(hidden)]
+    pub fn __unsafe_get_name(&self) -> String {
+        self.0.name.clone()
+    }
+
     /// Returns an array of strings containing the column paths of the [`View`]
     /// without any of the source columns.
     ///
@@ -245,6 +251,38 @@ impl View {
     pub async fn to_csv(&self, window: Option<JsViewWindow>) -> ApiResult<String> {
         let window = window.into_serde_ext::<Option<ViewWindow>>()?;
         Ok(self.0.to_csv(window.unwrap_or_default()).await?)
+    }
+
+    /// Fetches columns from the [`View`] in Arrow format, decodes them, and
+    /// passes typed array views to `callback`. All arrays are only valid for
+    /// the duration of the callback — if `callback` returns a `Promise`, it
+    /// is awaited before the backing Arrow buffer is released, so async
+    /// callbacks may use the views for the full duration of the awaited
+    /// work (e.g. across an `await requestAnimationFrame`-backed promise).
+    ///
+    /// # Arguments
+    ///
+    /// - `window` - Optional [`TypedArrayWindow`] controlling row/column
+    ///   windowing and output options (e.g., `float32` mode).
+    /// - `callback` - A JS function called with `(names: string[], values:
+    ///   TypedArray[], validities: (Uint8Array|null)[], dictionaries:
+    ///   (string[]|null)[]) => void | Promise<void>`.
+    #[wasm_bindgen]
+    pub async fn with_typed_arrays(
+        &self,
+        window: Option<crate::typed_array::JsTypedArrayWindow>,
+        callback: Function,
+    ) -> ApiResult<()> {
+        let opts: crate::typed_array::TypedArrayWindow = window
+            .into_serde_ext::<Option<crate::typed_array::TypedArrayWindow>>()?
+            .unwrap_or_default();
+
+        let float32 = opts.float32;
+        let mut view_window: ViewWindow = opts.into();
+        view_window.emit_legacy_row_path_names = Some(false);
+        let arrow = self.0.to_arrow(view_window).await?;
+        crate::typed_array::decode_and_call(&arrow, float32, &callback).await?;
+        Ok(())
     }
 
     /// Register a callback with this [`View`]. Whenever the view's underlying

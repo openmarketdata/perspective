@@ -48,7 +48,9 @@ t_ctx1::init() {
     // `t_data_table`s so that each context's expressions are isolated
     // and do not affect other contexts when they are calculated.
     const auto& expressions = m_config.get_expressions();
-    m_expression_tables = std::make_shared<t_expression_tables>(expressions);
+    m_expression_tables = std::make_shared<t_expression_tables>(
+        expressions, m_config.get_backing_store()
+    );
 
     m_init = true;
 }
@@ -276,7 +278,7 @@ t_ctx1::get_data(const std::vector<t_uindex>& rows) const {
 }
 
 void
-t_ctx1::notify(const t_data_table& flattened) {
+t_ctx1::notify(const t_data_table& flattened, bool /* is_registration */) {
     PSP_TRACE_SENTINEL();
     PSP_VERBOSE_ASSERT(m_init, "touching uninited object");
 

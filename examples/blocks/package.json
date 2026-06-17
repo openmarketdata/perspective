@@ -1,7 +1,7 @@
 {
     "name": "blocks",
     "private": true,
-    "version": "4.4.0",
+    "version": "4.5.1",
     "description": "A collection of simple client-side Perspective examples for `http://bl.ocks.org`.",
     "scripts": {
         "start": "mkdir -p dist && node --experimental-modules server.mjs",
@@ -14,9 +14,8 @@
         "@perspective-dev/client": "workspace:",
         "@perspective-dev/server": "workspace:",
         "@perspective-dev/viewer": "workspace:",
-        "@perspective-dev/viewer-d3fc": "workspace:",
+        "@perspective-dev/viewer-charts": "workspace:",
         "@perspective-dev/viewer-datagrid": "workspace:",
-        "@perspective-dev/viewer-openlayers": "workspace:",
         "@perspective-dev/workspace": "workspace:",
         "superstore-arrow": "catalog:"
     },

@@ -34,6 +34,8 @@ perspective-string-column-style {
     --psp-icon--radio-on--mask-image: url("../svg/radio-on.svg");
     --psp-icon--radio-hover--mask-image: url("../svg/radio-hover.svg");
     --psp-icon--radio-off--mask-image: url("../svg/radio-off.svg");
+    /* --psp-icon--checkbox-checked--mask-image: url("../svg/checkbox-checked-icon.svg");
+    --psp-icon--checkbox-unchecked--mask-image: url("../svg/checkbox-unchecked-icon.svg"); */
     --psp-icon--checkbox-on--mask-image: url("../svg/checkbox-on.svg");
     --psp-icon--checkbox-hover--mask-image: url("../svg/checkbox-hover.svg");
     --psp-icon--checkbox-off--mask-image: url("../svg/checkbox-off.svg");
@@ -76,8 +78,11 @@ perspective-string-column-style {
 
     /* Plugin Selector */
     --psp-plugin-selector--candlestick--content: url(../svg/mega-menu-icons-candlestick.svg);
+    --psp-plugin-selector--density--content: url(../svg/mega-menu-icons-density.svg);
     --psp-plugin-selector--heatmap--content: url(../svg/mega-menu-icons-heatmap.svg);
     --psp-plugin-selector--map-scatter--content: url(../svg/mega-menu-icons-map-scatter.svg);
+    --psp-plugin-selector--map-line--content: url(../svg/mega-menu-icons-map-line.svg);
+    --psp-plugin-selector--map-density--content: url(../svg/mega-menu-icons-map-density.svg);
     --psp-plugin-selector--ohlc--content: url(../svg/mega-menu-icons-ohlc.svg);
     --psp-plugin-selector--sunburst--content: url(../svg/mega-menu-icons-sunburst.svg);
     --psp-plugin-selector--treemap--content: url(../svg/mega-menu-icons-treemap.svg);
@@ -89,24 +94,6 @@ perspective-string-column-style {
     --psp-plugin-selector--y-line--content: url(../svg/mega-menu-icons-y-line.svg);
     --psp-plugin-selector--y-scatter--content: url(../svg/mega-menu-icons-y-scatter.svg);
     --psp-plugin-selector--datagrid--content: url(../svg/mega-menu-icons-datagrid.svg);
-
-    /* Colors */
-    color: #161616;
-    background-color: transparent;
-    --psp--color: #161616;
-    --psp-inactive--color: #ababab;
-    --psp-inactive--border-color: #dadada;
-
-    --psp-active--color: #2670a9;
-    --psp-error--color: #ff471e;
-    --psp--background-color: #ffffff;
-    --psp-icon-overflow-hint--color: rgba(0, 0, 0, 0.2);
-    --psp-select--background-color: none;
-    --psp-warning--background: #042121;
-    --psp-warning--color: #fdfffd;
-
-    /* TODO deprecate me */
-    --psp-icon-overflow-hint--color: #fdfffd;
 
     /* Datagrid */
     /* `regular-table` icons */
@@ -121,4 +108,5 @@ perspective-string-column-style {
     --psp-toolbar-edit-mode-select-row--content: url("../svg/datagrid-select-row.svg");
     --psp-toolbar-edit-mode-select-column--content: url("../svg/datagrid-select-column.svg");
     --psp-toolbar-edit-mode-select-region--content: url("../svg/datagrid-select-region.svg");
+    --psp-toolbar-edit-mode-select-row-tree--content: url("../svg/datagrid-select-row-tree.svg");
 }

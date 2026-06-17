@@ -14,25 +14,29 @@ import { focusSelectedCell } from "../../style_handlers/focus.js";
 import type {
     RegularTable,
     DatagridModel,
-    PerspectiveViewerElement,
-    SelectedPosition,
+    SelectedPositionMap,
 } from "../../types.js";
+import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
 
-type SelectedPositionMap = Map<RegularTable, SelectedPosition>;
+type AsyncMoveFunction = (
+    model: DatagridModel,
+    table: RegularTable,
+    selected_position_map: SelectedPositionMap,
+    active_cell: HTMLElement,
+    dx: number,
+    dy: number,
+) => Promise<void | undefined>;
 
-type AsyncFunction<T extends unknown[], R> = (
-    this: DatagridModel,
-    ...args: T
-) => Promise<R>;
-
-function lock<T extends unknown[], R>(
-    body: AsyncFunction<T, R>,
-): AsyncFunction<T, R | undefined> {
+function lock(body: AsyncMoveFunction): AsyncMoveFunction {
     let lockPromise: Promise<void> | undefined;
     return async function (
-        this: DatagridModel,
-        ...args: T
-    ): Promise<R | undefined> {
+        model: DatagridModel,
+        table: RegularTable,
+        selected_position_map: SelectedPositionMap,
+        active_cell: HTMLElement,
+        dx: number,
+        dy: number,
+    ): Promise<void | undefined> {
         if (lockPromise) {
             await lockPromise;
             return;
@@ -40,7 +44,14 @@ function lock<T extends unknown[], R>(
 
         let resolve: () => void;
         lockPromise = new Promise((x) => (resolve = x));
-        const result = await body.apply(this, args);
+        const result = await body(
+            model,
+            table,
+            selected_position_map,
+            active_cell,
+            dx,
+            dy,
+        );
         lockPromise = undefined;
         resolve!();
         return result;
@@ -52,23 +63,26 @@ interface ContentEditableElement extends HTMLElement {
     selectionStart?: number;
 }
 
-function getPos(this: ContentEditableElement): number {
-    if (this.isContentEditable) {
-        const _range = (this.getRootNode() as Document)
+function getPos(elem: ContentEditableElement): number {
+    if (elem.isContentEditable) {
+        const _range = (elem.getRootNode() as Document)
             .getSelection()
             ?.getRangeAt(0);
-        if (!_range) return 0;
+        if (!_range) {
+            return 0;
+        }
+
         const range = _range.cloneRange();
-        range.selectNodeContents(this);
+        range.selectNodeContents(elem);
         range.setEnd(_range.endContainer, _range.endOffset);
         return range.toString().length;
     } else {
-        return this.selectionStart || 0;
+        return elem.selectionStart || 0;
     }
 }
 
 const moveSelection = lock(async function (
-    this: DatagridModel,
+    model: DatagridModel,
     table: RegularTable,
     selected_position_map: SelectedPositionMap,
     active_cell: HTMLElement,
@@ -76,9 +90,12 @@ const moveSelection = lock(async function (
     dy: number,
 ): Promise<void> {
     const meta = table.getMeta(active_cell);
-    if (!meta || meta.type !== "body") return;
-    const num_columns = this._column_paths.length;
-    const num_rows = this._num_rows;
+    if (!meta || meta.type !== "body") {
+        return;
+    }
+
+    const num_columns = model._column_paths.length;
+    const num_rows = model._num_rows;
     const selected_position = selected_position_map.get(table);
     if (!selected_position) {
         return;
@@ -122,9 +139,9 @@ function isLastCell(
 }
 
 export function keydownListener(
-    this: DatagridModel,
+    model: DatagridModel,
     table: RegularTable,
-    _viewer: PerspectiveViewerElement,
+    _viewer: HTMLPerspectiveViewerElement,
     selected_position_map: SelectedPositionMap,
     event: KeyboardEvent,
 ): void {
@@ -134,12 +151,12 @@ export function keydownListener(
     switch (event.key) {
         case "Enter":
             event.preventDefault();
-            if (isLastCell(this, table, target)) {
+            if (isLastCell(model, table, target)) {
                 target.blur();
                 selected_position_map.delete(table);
             } else if (event.shiftKey) {
-                moveSelection.call(
-                    this,
+                moveSelection(
+                    model,
                     table,
                     selected_position_map,
                     target,
@@ -147,8 +164,8 @@ export function keydownListener(
                     -1,
                 );
             } else {
-                moveSelection.call(
-                    this,
+                moveSelection(
+                    model,
                     table,
                     selected_position_map,
                     target,
@@ -156,12 +173,13 @@ export function keydownListener(
                     1,
                 );
             }
+
             break;
         case "ArrowLeft":
-            if (getPos.call(target as ContentEditableElement) === 0) {
+            if (getPos(target as ContentEditableElement) === 0) {
                 event.preventDefault();
-                moveSelection.call(
-                    this,
+                moveSelection(
+                    model,
                     table,
                     selected_position_map,
                     target,
@@ -169,26 +187,20 @@ export function keydownListener(
                     0,
                 );
             }
+
             break;
         case "ArrowUp":
             event.preventDefault();
-            moveSelection.call(
-                this,
-                table,
-                selected_position_map,
-                target,
-                0,
-                -1,
-            );
+            moveSelection(model, table, selected_position_map, target, 0, -1);
             break;
         case "ArrowRight":
             if (
-                getPos.call(target as ContentEditableElement) ===
+                getPos(target as ContentEditableElement) ===
                 (target.textContent?.length || 0)
             ) {
                 event.preventDefault();
-                moveSelection.call(
-                    this,
+                moveSelection(
+                    model,
                     table,
                     selected_position_map,
                     target,
@@ -196,17 +208,11 @@ export function keydownListener(
                     0,
                 );
             }
+
             break;
         case "ArrowDown":
             event.preventDefault();
-            moveSelection.call(
-                this,
-                table,
-                selected_position_map,
-                target,
-                0,
-                1,
-            );
+            moveSelection(model, table, selected_position_map, target, 0, 1);
             break;
         default:
     }
