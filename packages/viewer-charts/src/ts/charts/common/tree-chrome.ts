@@ -17,12 +17,21 @@ import type { GradientStop } from "../../theme/gradient";
 import type { Vec3 } from "../../theme/palette";
 import type { Theme } from "../../theme/theme";
 import {
+    gradientLegendAutoFit,
+    legendAutoFit,
     renderCategoricalLegend,
     renderCategoricalLegendAt,
     renderLegend,
+    renderLegendAt,
+    type LegendPaintView,
 } from "../../axis/legend";
+import {
+    legendSidebarWidth,
+    resolveLegendMode,
+} from "../../interaction/legend-controller";
 import type { TreeChartBase } from "./tree-chart";
 import { drawTooltipBox } from "./draw-tooltip-box";
+import { tooltipStyleOf } from "../../interaction/tooltip-grid";
 
 /**
  * Click target for one breadcrumb segment. Tree-chart hit-testing
@@ -112,23 +121,24 @@ export function renderTreeTooltip(
     cssHeight: number,
     fontFamily: string,
 ): void {
-    const lines =
+    const grid =
         chart._lazyTooltip.hoveredTarget === nodeId
-            ? (chart._lazyTooltip.lines ?? [])
+            ? (chart._lazyTooltip.grid ?? [])
             : [];
-    if (lines.length === 0) {
+    if (grid.length === 0) {
         return;
     }
 
     drawTooltipBox(
         ctx,
         chart._resolveTheme(),
-        lines,
+        grid,
         cx,
         cy,
         cssWidth,
         cssHeight,
         fontFamily,
+        tooltipStyleOf(chart._pluginConfig),
     );
 }
 
@@ -159,50 +169,119 @@ export function renderTreeColorLegend(
     cssHeight: number,
     categoricalRect: PlotRect | null = null,
 ): void {
-    if (chart._colorMode === "series" && chart._uniqueColorLabels.size > 1) {
-        if (categoricalRect) {
+    const cfg = chart._pluginConfig;
+    const hasCategorical =
+        chart._colorMode === "series" && chart._uniqueColorLabels.size > 1;
+    const hasNumeric =
+        chart._colorMode === "numeric" && chart._colorMin < chart._colorMax;
+    const mode = resolveLegendMode(
+        cfg,
+        hasCategorical ? chart._uniqueColorLabels.size : 0,
+    );
+    if (mode === "none" || (!hasCategorical && !hasNumeric)) {
+        chart._legend.clearPainted();
+        return;
+    }
+
+    const floating = mode === "floating";
+    const view: LegendPaintView = {
+        mode: floating ? "floating" : "sidebar",
+        legend: chart._legend,
+        title: chart._colorName || "Legend",
+        opacity: cfg.legend_opacity,
+    };
+    const floatBox = floating
+        ? chart._legend.floatingBox(
+              cfg,
+              cssWidth,
+              cssHeight,
+              hasCategorical
+                  ? legendAutoFit(
+                        canvas,
+                        theme,
+                        chart._uniqueColorLabels.size,
+                        () => chart._uniqueColorLabels.keys(),
+                        { title: view.title },
+                    )
+                  : gradientLegendAutoFit(
+                        canvas,
+                        theme,
+                        { min: chart._colorMin, max: chart._colorMax },
+                        undefined,
+                        view.title,
+                    ),
+          )
+        : null;
+
+    if (hasCategorical) {
+        if (floatBox) {
+            renderCategoricalLegendAt(
+                canvas,
+                floatBox,
+                chart._uniqueColorLabels,
+                palette,
+                theme,
+                view,
+            );
+        } else if (categoricalRect) {
             renderCategoricalLegendAt(
                 canvas,
                 categoricalRect,
                 chart._uniqueColorLabels,
                 palette,
                 theme,
+                { ...view, sidebarGutter: categoricalRect.width },
             );
         } else {
             renderCategoricalLegend(
                 canvas,
-                syntheticLegendLayout(cssWidth, cssHeight),
+                syntheticLegendLayout(cssWidth, cssHeight, cfg),
                 chart._uniqueColorLabels,
                 palette,
                 theme,
+                view,
             );
         }
-    } else if (
-        chart._colorMode === "numeric" &&
-        chart._colorMin < chart._colorMax
-    ) {
-        renderLegend(
-            canvas,
-            syntheticLegendLayout(cssWidth, cssHeight),
-            {
-                min: chart._colorMin,
-                max: chart._colorMax,
-                label: chart._colorName,
-            },
-            stops,
-            theme,
-            chart.getColumnFormatter(chart._colorName, "value"),
-        );
+    } else {
+        const colorDomain = {
+            min: chart._colorMin,
+            max: chart._colorMax,
+            label: chart._colorName,
+        };
+        const formatter = chart.getColumnFormatter(chart._colorName, "value");
+        if (floatBox) {
+            renderLegendAt(
+                canvas,
+                floatBox,
+                colorDomain,
+                stops,
+                theme,
+                formatter,
+                view,
+            );
+        } else {
+            renderLegend(
+                canvas,
+                syntheticLegendLayout(cssWidth, cssHeight, cfg),
+                colorDomain,
+                stops,
+                theme,
+                formatter,
+                view,
+            );
+        }
     }
 }
 
 function syntheticLegendLayout(
     cssWidth: number,
     cssHeight: number,
+    cfg: TreeChartBase["_pluginConfig"],
 ): PlotLayout {
     return new PlotLayout(cssWidth, cssHeight, {
         hasXLabel: false,
         hasYLabel: false,
         hasLegend: true,
+        rightExtra: legendSidebarWidth(cfg, 80),
     });
 }

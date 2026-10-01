@@ -15,6 +15,8 @@ import { HTMLPerspectiveViewerWebGLPluginElement } from "./plugin/plugin";
 
 export type { PerspectiveClickDetail } from "./event-detail";
 export { PerspectiveSelectDetail } from "./event-detail";
+export { registerTileSource } from "./plugin/plugin";
+export { tileSources, type TileSourceSpec } from "./map/tile-source";
 
 export function register(...plugin_names: string[]) {
     const plugins = new Set(
@@ -23,17 +25,17 @@ export function register(...plugin_names: string[]) {
             : CHARTS.map((chart) => chart.name),
     );
 
+    const already_registered: string[] = [];
+
     CHARTS.forEach((chart) => {
         if (plugins.has(chart.name)) {
             const tagName = `perspective-viewer-charts-${chart.tag}`;
 
-            // Each registered tag is a thin subclass that pins
-            // `_chartType` so `draw()` / `save()` / etc. know which
-            // `ChartTypeConfig` they're driving. The chart impl
-            // class itself lives in the worker bundle — only
-            // `ChartTypeConfig.tag` crosses the host/renderer
-            // boundary, and the renderer constructs the impl from
-            // its own `CHART_IMPLS` registry.
+            if (customElements.get(tagName)) {
+                already_registered.push(tagName);
+                return;
+            }
+
             customElements.define(
                 tagName,
                 class extends HTMLPerspectiveViewerWebGLPluginElement {
@@ -48,6 +50,12 @@ export function register(...plugin_names: string[]) {
             });
         }
     });
+
+    if (already_registered.length > 0) {
+        console.warn(
+            `viewer-charts plugins already registered (${already_registered.length}); skipping duplicate registration (Perspective was loaded more than once on this page).`,
+        );
+    }
 }
 
 register();

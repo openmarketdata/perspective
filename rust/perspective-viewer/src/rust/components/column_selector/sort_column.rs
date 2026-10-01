@@ -11,15 +11,15 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 use perspective_client::config::*;
-use perspective_js::utils::ApiFuture;
 use web_sys::*;
 use yew::prelude::*;
 
-use crate::components::containers::dragdrop_list::*;
+use crate::components::dragdrop_list::*;
 use crate::components::type_icon::TypeIcon;
 use crate::presentation::Presentation;
 use crate::renderer::*;
 use crate::session::*;
+use crate::tasks::apply_and_render;
 use crate::utils::*;
 
 #[derive(Properties)]
@@ -86,11 +86,8 @@ impl Component for SortColumn {
 
                 let session = ctx.props().session.clone();
                 let renderer = ctx.props().renderer.clone();
-                if session.update_view_config(update).is_ok() {
-                    ApiFuture::spawn(async move {
-                        renderer.apply_pending_plugin()?;
-                        renderer.draw(session.validate().await?.create_view()).await
-                    });
+                if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                    spawn_owned("sort-column", task);
                 }
 
                 false
@@ -107,9 +104,12 @@ impl Component for SortColumn {
             let event_name = ctx.props().sort.0.to_owned();
             let presentation = ctx.props().presentation.clone();
             move |event: DragEvent| {
-                presentation.set_drag_image(&event).unwrap();
-                presentation
-                    .notify_drag_start(event_name.to_string(), DragEffect::Move(DragTarget::Sort))
+                if presentation.set_drag_image(&event) {
+                    presentation.notify_drag_start(
+                        event_name.to_string(),
+                        DragEffect::Move(DragTarget::Sort),
+                    )
+                }
             }
         });
 

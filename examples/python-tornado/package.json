@@ -1,7 +1,7 @@
 {
     "name": "python-tornado",
     "private": true,
-    "version": "4.5.1",
+    "version": "5.5.1",
     "description": "An example of editing a `perspective-python` server from the browser.",
     "scripts": {
         "start": "PYTHONPATH=../../python/perspective python3 server.py"
@@ -9,11 +9,10 @@
     "keywords": [],
     "license": "Apache-2.0",
     "dependencies": {
-        "@perspective-dev/client": "workspace:",
-        "@perspective-dev/viewer": "workspace:",
-        "@perspective-dev/viewer-charts": "workspace:",
-        "@perspective-dev/viewer-datagrid": "workspace:",
-        "@perspective-dev/workspace": "workspace:",
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
+        "@perspective-dev/viewer-charts": "workspace:^",
+        "@perspective-dev/viewer-datagrid": "workspace:^",
         "superstore-arrow": "^3.2.0"
     },
     "devDependencies": {

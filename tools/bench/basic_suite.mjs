@@ -46,7 +46,7 @@ perspective_bench.suite(
             );
             client = await perspective.websocket(path);
             metadata = {
-                version: "4.5.1",
+                version: "5.5.1",
                 version_idx,
             };
         } else {
@@ -71,5 +71,6 @@ perspective_bench.suite(
         await all_benchmarks.view_suite(client, metadata);
         await all_benchmarks.to_data_suite(client, metadata);
         await all_benchmarks.join_suite(client, metadata);
+        await all_benchmarks.window_suite(client, metadata);
     },
 );

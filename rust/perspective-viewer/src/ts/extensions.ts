@@ -14,45 +14,10 @@ import type { HTMLPerspectiveViewerPluginElement } from "./plugin";
 import type { PerspectiveViewerElement } from "../../dist/wasm/perspective-viewer.js";
 import type React from "react";
 import type { ViewerConfigUpdate } from "./ts-rs/ViewerConfigUpdate.js";
-import type {
-    ViewWindow,
-    ViewConfigUpdate,
-    Filter,
-} from "@perspective-dev/client";
+import type { ViewWindow, Filter } from "@perspective-dev/client";
+import type { PerspectiveSelectDetail } from "./select-detail.ts";
 
-export class PerspectiveSelectDetail {
-    selected: boolean;
-    row: Record<string, unknown>;
-    column_names?: string[];
-    removeConfigs: ViewConfigUpdate[];
-    insertConfigs: ViewConfigUpdate[];
-    constructor(
-        selected: boolean,
-        row: Record<string, unknown>,
-        column_names: string[],
-        removeConfigs: ViewConfigUpdate[],
-        insertConfigs: ViewConfigUpdate[],
-    ) {
-        this.selected = selected;
-        this.row = row;
-        this.column_names = column_names;
-        this.removeConfigs = removeConfigs;
-        this.insertConfigs = insertConfigs;
-    }
-
-    get removeFilters(): Filter[] {
-        return this.removeConfigs.flatMap((x) => x.filter ?? []);
-    }
-
-    get insertFilters(): Filter[] {
-        return this.insertConfigs.flatMap((x) => x.filter ?? []);
-    }
-}
-
-import type {
-    ExportDropDownMenuElement,
-    CopyDropDownMenuElement,
-} from "../../dist/wasm/perspective-viewer.d.ts";
+export { PerspectiveSelectDetail } from "./select-detail.ts";
 
 // DOM extensions
 
@@ -60,22 +25,29 @@ export type HTMLPerspectiveViewerElement = PerspectiveViewerElement &
     PerspectiveViewerElementExt &
     HTMLElement;
 
-export interface HTMLPerspectiveViewerExportMenuElement
-    extends HTMLElement,
-        ExportDropDownMenuElement {}
-
-export interface HTMLPerspectiveViewerCopyMenuElement
-    extends HTMLElement,
-        CopyDropDownMenuElement {}
-
 export type PerspectiveClickEventDetail = {
     config: ViewerConfigUpdate;
     row: Record<string, any>;
     column_names: Array<string | Array<string>>;
+    panel?: string;
 };
 
 export type PerspectiveSelectEventDetail = {
     view_window: ViewWindow;
+};
+
+export type PerspectiveConfigUpdateEventDetail = {
+    /**
+     * Serialize the panel config that triggered this event, ON DEMAND. The
+     * serialization is deferred so a config change with no interested listener
+     * costs nothing; call `getConfig()` only if you need the config.
+     *
+     * Valid ONLY synchronously within the event callback — the backing closure
+     * is released immediately after dispatch, so stashing `getConfig` and
+     * calling it later throws. To read config outside the callback, use
+     * `viewer.save()` / `viewer.saveWorkspace()`.
+     */
+    getConfig(): ViewerConfigUpdate;
 };
 
 // JSX / React extensions
@@ -196,7 +168,13 @@ export interface PerspectiveViewerElementExt {
 
     addEventListener(
         name: "perspective-global-filter",
-        cb: (e: CustomEvent<PerspectiveSelectEventDetail>) => void,
+        cb: (e: CustomEvent<PerspectiveSelectDetail>) => void,
+        options?: { signal: AbortSignal },
+    ): void;
+
+    addEventListener(
+        name: "perspective-global-filter-update",
+        cb: (e: CustomEvent<Filter[]>) => void,
         options?: { signal: AbortSignal },
     ): void;
 
@@ -214,7 +192,7 @@ export interface PerspectiveViewerElementExt {
 
     addEventListener(
         name: "perspective-config-update",
-        cb: (e: CustomEvent) => void,
+        cb: (e: CustomEvent<PerspectiveConfigUpdateEventDetail>) => void,
         options?: { signal: AbortSignal },
     ): void;
 
@@ -239,6 +217,10 @@ export interface PerspectiveViewerElementExt {
     removeEventListener(name: "perspective-click", cb: any): void;
     removeEventListener(name: "perspective-select", cb: any): void;
     removeEventListener(name: "perspective-global-filter", cb: any): void;
+    removeEventListener(
+        name: "perspective-global-filter-update",
+        cb: any,
+    ): void;
     removeEventListener(name: "perspective-toggle-settings", cb: any): void;
     removeEventListener(
         name: "perspective-toggle-settings-before",

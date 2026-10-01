@@ -10,19 +10,17 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-use std::collections::HashSet;
 use std::rc::Rc;
 
+use itertools::Itertools;
 use perspective_client::config::*;
-use perspective_js::utils::ApiFuture;
 use yew::prelude::*;
 
-use crate::components::containers::select::*;
-use crate::components::style::LocalStyle;
-use crate::css;
 use crate::renderer::*;
 use crate::session::*;
-use crate::utils::PtrEqRc;
+use crate::tasks::apply_and_render;
+use crate::ui::{Select, SelectItem};
+use crate::utils::{PtrEqRc, spawn_owned};
 
 #[derive(Properties)]
 pub struct AggregateSelectorProps {
@@ -119,7 +117,6 @@ impl Component for AggregateSelector {
 
         html! {
             <>
-                <LocalStyle href={css!("aggregate-selector")} />
                 <div class="aggregate-selector-wrapper">
                     <Select<Aggregate>
                         wrapper_class="aggregate-selector"
@@ -146,11 +143,8 @@ impl AggregateSelector {
 
         let session = ctx.props().session.clone();
         let renderer = ctx.props().renderer.clone();
-        if session.update_view_config(config).is_ok() {
-            ApiFuture::spawn(async move {
-                renderer.apply_pending_plugin()?;
-                renderer.draw(session.validate().await?.create_view()).await
-            });
+        if let Ok(task) = apply_and_render(&session, &renderer, config) {
+            spawn_owned("aggregate-selector", task);
         }
     }
 
@@ -169,8 +163,7 @@ impl AggregateSelector {
                 Aggregate::MultiAggregate(x, _) => Some(x),
                 _ => None,
             })
-            .collect::<HashSet<_>>()
-            .into_iter()
+            .unique()
             .map(|x| {
                 SelectItem::OptGroup(
                     x.clone().into(),

@@ -35,7 +35,6 @@ const IS_PLAYWRIGHT = get_scope().reduce(
             "viewer-charts",
             "viewer-workspace",
             "workspace",
-            "jupyterlab",
         ].includes(pkg),
     false,
 );
@@ -57,7 +56,10 @@ function playwright(pkg, is_jlab) {
         .slice(2)
         .filter(
             (x) =>
-                x !== "--ci" && x !== "--jupyter" && x !== "--fetch-snapshots",
+                x !== "--" &&
+                x !== "--ci" &&
+                x !== "--jupyter" &&
+                x !== "--fetch-snapshots",
         );
 
     const env = { ...process.env, TZ: "UTC" };
@@ -83,7 +85,8 @@ function playwright(pkg, is_jlab) {
     }
 
     const cmd = [
-        "npx",
+        "pnpm",
+        "exec",
         "playwright",
         "test",
         "--config=tools/test/playwright.config.ts",

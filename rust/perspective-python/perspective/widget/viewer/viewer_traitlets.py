@@ -10,15 +10,11 @@
 #  ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 #  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-from traitlets import HasTraits, Unicode, List, Bool, Dict, validate, Enum
+from traitlets import HasTraits, Unicode, List, Bool, Dict, Enum
 
 import importlib.metadata
 
 __version__ = importlib.metadata.version("perspective-python")
-
-from .validate import (
-    validate_version,
-)
 
 
 class PerspectiveTraitlets(HasTraits):
@@ -38,8 +34,13 @@ class PerspectiveTraitlets(HasTraits):
     # `perspective-viewer` options
     plugin = Unicode("Datagrid").tag(sync=True)
     columns = List(default_value=[]).tag(sync=True)
+    columns_config = Dict(default_value={}).tag(sync=True)
     group_by = List(trait=Unicode(), default_value=[]).tag(sync=True, o=True)
     split_by = List(trait=Unicode(), default_value=[]).tag(sync=True)
+    group_rollup_mode = Enum(("rollup", "flat", "total"), default_value="rollup").tag(
+        sync=True
+    )
+    split_rollup_mode = Enum(("flat", "rollup"), default_value="flat").tag(sync=True)
     aggregates = Dict(default_value={}).tag(sync=True)
     sort = List(default_value=[]).tag(sync=True)
     filter = List(default_value=[]).tag(sync=True)
@@ -95,7 +96,3 @@ class PerspectiveTraitlets(HasTraits):
     # @validate("title")
     # def _validate_title(self, proposal):
     #     return validate_title(proposal.value)
-
-    @validate("version")
-    def _validate_version(self, proposal):
-        return validate_version(proposal.value)

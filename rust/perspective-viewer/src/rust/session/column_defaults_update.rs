@@ -20,16 +20,25 @@ use crate::config::PluginStaticConfig;
 
 #[extend::ext]
 pub impl ViewConfigUpdate {
-    /// Appends additional columns to the `columns` field of this
-    /// `ViewConfigUpdate` by picking appropriate new columns from the
-    /// `SessionMetadata`, given the necessary column requirements of the
-    /// plugin provided by a `PluginStaticConfig`. For example, an "X/Y
-    /// Scatter" chart needs a minimum of 2 numeric columns to be
-    /// drawable.
-    fn set_update_column_defaults(
+    /// Coerce this update's `group_rollup_mode` / `split_rollup_mode` to one
+    /// the plugin accepts (`PluginStaticConfig::*_rollup_modes`,
+    /// feature-filtered). An absent mode counts as `current`'s committed mode
+    /// for the acceptance check — `ViewConfig::apply_update` KEEPS the
+    /// committed mode when the update's field is `None`, so acceptance must
+    /// be judged against the mode that will actually be in effect. A
+    /// hardcoded-default fallback here let a plugin swap silently retain a
+    /// mode the new plugin excludes (e.g. Datagrid's `split_rollup_mode:
+    /// "rollup"` surviving a `restore({plugin: "Y Bar"})` onto a flat-only
+    /// chart).
+    ///
+    /// Split out of [`Self::set_update_column_defaults`] so same-plugin
+    /// restores can enforce the mode WITHOUT the column-defaulting below —
+    /// that path must not touch `columns` (it would drop non-numeric color
+    /// slots from a partial restore).
+    fn set_update_rollup_defaults(
         &mut self,
         metadata: &SessionMetadata,
-        columns: &[Option<String>],
+        current: &ViewConfig,
         config_static: &PluginStaticConfig,
     ) {
         let rollup_features = metadata
@@ -41,7 +50,7 @@ pub impl ViewConfigUpdate {
         if !group_rollups.contains(
             self.group_rollup_mode
                 .as_ref()
-                .unwrap_or(&GroupRollupMode::Rollup),
+                .unwrap_or(&current.group_rollup_mode),
         ) {
             self.group_rollup_mode = group_rollups.first().cloned();
             tracing::debug!(
@@ -49,6 +58,40 @@ pub impl ViewConfigUpdate {
                 self.group_rollup_mode
             );
         }
+
+        let split_rollup_features = metadata
+            .get_features()
+            .map(|x| x.get_split_rollup_modes())
+            .unwrap_or_default();
+
+        let split_rollups = config_static.get_split_rollups(&split_rollup_features);
+        if !split_rollups.contains(
+            self.split_rollup_mode
+                .as_ref()
+                .unwrap_or(&current.split_rollup_mode),
+        ) {
+            self.split_rollup_mode = split_rollups.first().cloned();
+            tracing::debug!(
+                "Setting plugin-advised split rollup mode {:?}",
+                self.split_rollup_mode
+            );
+        }
+    }
+
+    /// Appends additional columns to the `columns` field of this
+    /// `ViewConfigUpdate` by picking appropriate new columns from the
+    /// `SessionMetadata`, given the necessary column requirements of the
+    /// plugin provided by a `PluginStaticConfig`. For example, an "X/Y
+    /// Scatter" chart needs a minimum of 2 numeric columns to be
+    /// drawable.
+    fn set_update_column_defaults(
+        &mut self,
+        metadata: &SessionMetadata,
+        current: &ViewConfig,
+        columns: &[Option<String>],
+        config_static: &PluginStaticConfig,
+    ) {
+        self.set_update_rollup_defaults(metadata, current, config_static);
 
         if let (None, Some(min_cols)) = (&self.columns, config_static.min_config_columns) {
             let names_len = config_static.config_column_names.len();

@@ -28,22 +28,38 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url)).slice(0, -1);
 
 const CLIENT_VERSION = {
     master: "@perspective-dev/client",
+    "5.5.0": "perspective-5-5-0",
+    "5.4.0": "perspective-5-4-0",
+    "5.3.0": "perspective-5-3-0",
+    "5.2.0": "perspective-5-2-0",
+    "5.1.0": "perspective-5-1-0",
+    "5.0.0": "perspective-5-0-0",
+    "4.5.0": "perspective-4-5-0",
+    "4.4.0": "perspective-4-4-0",
+    "4.3.0": "perspective-4-3-0",
+    "4.2.0": "perspective-4-2-0",
+    "4.1.0": "perspective-4-1-0",
+    "4.0.0": "perspective-4-0-0",
+    "3.8.0": "perspective-3-8-0",
     "3.6.0": "perspective-3-6-0",
     "3.5.0": "perspective-3-5-0",
     "3.4.0": "perspective-3-4-0",
     "3.3.0": "perspective-3-3-0",
     "3.2.0": "perspective-3-2-0",
     "3.1.0": "perspective-3-1-0",
-    "3.0.3": "perspective-3-0-0",
-    "2.10.1": "perspective-2-10-0",
-    "2.9.0": "perspective-2-9-0",
-    "2.8.0": "perspective-2-8-0",
-    "2.7.0": "perspective-2-7-0",
-    "2.6.0": "perspective-2-6-0",
-    "2.5.0": "perspective-2-5-0",
-    "2.4.0": "perspective-2-4-0",
-    "2.3.2": "perspective-2-3-0",
-    "2.3.1": "perspective-2-3-0",
+
+    // TODO(texodus): These suites are legacy broken with python 3.9+ and can't
+    // run in CI anymore, need to add python sandboxing to support them.
+    // "3.0.3": "perspective-3-0-0",
+    // "2.10.1": "perspective-2-10-0",
+    // "2.9.0": "perspective-2-9-0",
+    // "2.8.0": "perspective-2-8-0",
+    // "2.7.0": "perspective-2-7-0",
+    // "2.6.0": "perspective-2-6-0",
+    // "2.5.0": "perspective-2-5-0",
+    // "2.4.0": "perspective-2-4-0",
+    // "2.3.2": "perspective-2-3-0",
+    // "2.3.1": "perspective-2-3-0",
 };
 
 fs.mkdirSync(path.join(__dirname, "./dist"), { recursive: true });
@@ -65,6 +81,7 @@ perspective_bench.suite(
         await all_benchmarks.view_suite(client, metadata);
         await all_benchmarks.to_data_suite(client, metadata);
         await all_benchmarks.join_suite(client, metadata);
+        await all_benchmarks.window_suite(client, metadata);
     },
     python.start,
     python.stop,

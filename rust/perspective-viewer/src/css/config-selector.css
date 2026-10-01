@@ -60,7 +60,8 @@
         }
     }
 
-    #top_panel {
+    #top_panel,
+    #window-editor-slots {
         display: flex;
         flex-direction: column;
         justify-content: stretch;
@@ -107,7 +108,7 @@
                 display: flex;
                 align-items: center;
                 position: relative;
-                padding-right: 8px;
+                padding-right: 3px;
 
                 .column_name {
                     display: block;
@@ -176,6 +177,7 @@
                 flex: 1 1 auto;
                 align-self: stretch;
                 position: relative;
+                min-height: 24px;
                 &:before {
                     content: " ";
                     position: absolute;
@@ -199,20 +201,77 @@
             pointer-events: none;
         }
 
+        /* `--psp-label--pivot--content` is set inline by the pivot slot
+         * when the ACTIVE plugin declares what the field draws (a `Y Line`
+         * groups by its X axis; a `Treemap` by its hierarchy). The slot
+         * emits an intl var reference rather than words, so these labels
+         * localize like any other.
+         *
+         * The role leads and the field's own name follows as a secondary
+         * label, so the reader learns what this slot DRAWS without losing
+         * which config field it IS - and a plugin that declares no role
+         * shows just the field name, exactly as before. The slot sets
+         * `--psp-label--pivot-secondary--display` as a presence flag,
+         * since CSS cannot test whether a custom property is set. */
         #group_by label.pivot-selector-label:before {
-            content: var(--psp-label--group-by--content, "Group By");
+            content: var(
+                --psp-label--pivot--content,
+                var(--psp-label--group-by--content, var(--psp-missing))
+            );
+        }
+
+        #group_by label.pivot-selector-label:after {
+            content: "(" var(--psp-label--group-by--content, var(--psp-missing))
+                ")";
         }
 
         #split_by label.pivot-selector-label:before {
-            content: var(--psp-label--split-by--content, "Split By");
+            content: var(
+                --psp-label--pivot--content,
+                var(--psp-label--split-by--content, var(--psp-missing))
+            );
+        }
+
+        #split_by label.pivot-selector-label:after {
+            content: "(" var(--psp-label--split-by--content, var(--psp-missing))
+                ")";
+        }
+
+        #group_by label.pivot-selector-label:after,
+        #split_by label.pivot-selector-label:after {
+            display: var(--psp-label--pivot-secondary--display, none);
+            margin-left: 6px;
+            opacity: 0.6;
+            font-size: 0.9em;
         }
 
         #sort label.pivot-selector-label:before {
-            content: var(--psp-label--sort--content, "Order By");
+            content: var(--psp-label--sort--content, var(--psp-missing));
         }
 
         #filter label.pivot-selector-label:before {
-            content: var(--psp-label--filter--content, "Where");
+            content: var(--psp-label--filter--content, var(--psp-missing));
+        }
+
+        #window-source label.pivot-selector-label:before {
+            content: var(
+                --psp-label--window-source--content,
+                var(--psp-missing)
+            );
+        }
+
+        #window-order-by label.pivot-selector-label:before {
+            content: var(
+                --psp-label--window-order-by--content,
+                var(--psp-missing)
+            );
+        }
+
+        #window-partition-by label.pivot-selector-label:before {
+            content: var(
+                --psp-label--window-partition-by--content,
+                var(--psp-missing)
+            );
         }
 
         .rrow {
@@ -303,7 +362,8 @@
             }
         }
 
-        .group_rollup_wrapper {
+        .group_rollup_wrapper,
+        .split_rollup_wrapper {
             margin-bottom: -30px;
             flex: 0 1 auto;
             color: var(--psp-inactive--color);
@@ -341,10 +401,14 @@
         }
     }
 
+    #window-editor-slots .pivot-column {
+        min-height: 24px;
+    }
+
     .sort-icon {
         display: inline-flex;
         margin-left: auto;
-        /* margin-right: 8px; */
+        margin-right: 3px;
         cursor: pointer;
         font-family: var(--psp-button--font-family, inherit);
         background-repeat: no-repeat;

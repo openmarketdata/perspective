@@ -55,17 +55,17 @@ use crate::proto::HostedTable;
 pub use crate::proto::JoinType;
 pub use crate::session::{ProxySession, Session};
 pub use crate::table::{
-    DeleteOptions, ExprValidationResult, JoinOptions, Table, TableInitOptions, TableReadFormat,
-    UpdateOptions,
+    DeleteOptions, DescribeError, DescribeVerdict, Description, ExprValidationResult, JoinOptions,
+    Table, TableInitOptions, TableReadFormat, UpdateOptions,
 };
 pub use crate::table_data::{TableData, UpdateData};
 pub use crate::table_ref::TableRef;
 pub use crate::view::{
-    ColumnWindow, OnUpdateData, OnUpdateMode, OnUpdateOptions, View, ViewWindow,
+    ColumnWindow, OnRemoveData, OnUpdateData, OnUpdateMode, OnUpdateOptions, View, ViewWindow,
 };
 
 pub type ClientError = utils::ClientError;
-pub type ExprValidationError = crate::proto::table_validate_expr_resp::ExprValidationError;
+pub type ExprValidationError = crate::proto::ExpressionError;
 
 #[doc(hidden)]
 pub mod vendor {
@@ -99,6 +99,7 @@ macro_rules! assert_table_api {
                     &$x::clear,
                     &$x::columns,
                     &$x::delete,
+                    &$x::describe,
                     &$x::get_index,
                     &$x::get_limit,
                     &$x::get_client,
@@ -135,6 +136,7 @@ macro_rules! assert_view_api {
                     &$x::num_rows,
                   //  &$x::on_update,
                     &$x::remove_update,
+                    &$x::remove_remove,
                     &$x::on_delete,
                     &$x::remove_delete,
                     &$x::schema,

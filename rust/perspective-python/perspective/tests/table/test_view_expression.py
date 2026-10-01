@@ -17,6 +17,8 @@ from pytest import raises
 from datetime import date, datetime
 from time import mktime
 from perspective import PerspectiveError
+import pytest
+
 from .test_view import compare_delta
 import perspective as psp
 
@@ -35,6 +37,61 @@ class TestViewExpression(object):
         assert validate["expression_schema"] == {}
         assert validate["expression_alias"] == {}
         assert validate["errors"] == {}
+
+    def test_table_describe_valid(self):
+        table = Table({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
+        config = dict(
+            columns=["a", "b", "x"],
+            group_by=["b"],
+            aggregates={"a": "avg"},
+            expressions={"x": '"a" * 2'},
+        )
+
+        verdict = table.describe(**config)
+        view = table.view(**config)
+        assert verdict == {
+            "expression_schema": {"x": "float"},
+            "view_schema": view.schema(),
+        }
+
+        view.delete()
+
+    def test_table_describe_split_by_parity(self):
+        table = Table({"a": [1, 2, 3, 4], "b": ["x", "y", "x", "y"], "c": [1.5, 2.5, 3.5, 4.5]})
+        for config in [
+            dict(columns=["a", "c"], split_by=["b"]),
+            dict(columns=["a", "c"], split_by=["b"], aggregates={"a": "avg"}),
+            dict(columns=["a", "c"], group_by=["b"], split_by=["b"], aggregates={"a": "avg"}),
+            dict(columns=["a", "c"], split_by=["b"], group_rollup_mode="total", aggregates={"a": "avg"}),
+        ]:
+            verdict = table.describe(**config)
+            view = table.view(**config)
+            assert verdict["view_schema"] == view.schema(), config
+            view.delete()
+
+    def test_table_describe_expression_errors(self):
+        table = Table({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
+        verdict = table.describe(
+            columns=["a"],
+            expressions={"good": '"a" + 1', "bad": '"nope" + 1', "worse": "for () {}"},
+        )
+
+        assert sorted(verdict.keys()) == ["expression_errors", "expression_schema"]
+        assert verdict["expression_schema"] == {"good": "float"}
+        assert sorted(verdict["expression_errors"].keys()) == ["bad", "worse"]
+        assert verdict["expression_errors"]["bad"] == {
+            "column": 0,
+            "error_message": 'Value Error - Input column "nope" does not exist.',
+            "line": 0,
+        }
+
+    def test_table_describe_config_error(self):
+        table = Table({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
+        verdict = table.describe(columns=["a", "nope"])
+        assert list(verdict.keys()) == ["config_error"]
+        assert "nope" in verdict["config_error"]
+        with pytest.raises(Exception):
+            table.view(columns=["a", "nope"])
 
     def test_view_expression_schema_empty(self):
         table = Table({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
@@ -336,17 +393,131 @@ class TestViewExpression(object):
         table = Table({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
         validated = table.validate_expressions({"computed": " 'a' == null"})
 
-        assert validated["expression_schema"] == {"computed": "float"}
+        assert validated["expression_schema"] == {"computed": "boolean"}
 
         view = table.view(expressions={"computed": " 'a' == null"})
 
         assert view.to_columns() == {
             "a": [1, 2, 3, 4],
             "b": [5, 6, 7, 8],
-            "computed": [0, 0, 0, 0],
+            "computed": [False, False, False, False],
         }
 
-        assert view.expression_schema() == {"computed": "float"}
+        assert view.expression_schema() == {"computed": "boolean"}
+
+    def test_view_expression_column_compare_null(self):
+        table = Table({"a": [1, None, 3, None], "b": ["null", None, "x", None]})
+        expressions = {
+            "isnull": '"a" == null',
+            "notnull": '"a" != null',
+            "reversed": 'null != "b"',
+            "text": "\"b\" == 'null'",
+        }
+        validated = table.validate_expressions(expressions)
+        assert validated["expression_schema"] == {
+            "isnull": "boolean",
+            "notnull": "boolean",
+            "reversed": "boolean",
+            "text": "boolean",
+        }
+        view = table.view(expressions=expressions)
+        assert view.to_columns() == {
+            "a": [1, None, 3, None],
+            "b": ["null", None, "x", None],
+            "isnull": [False, True, False, True],
+            "notnull": [True, False, True, False],
+            "reversed": [True, False, True, False],
+            "text": [True, False, False, False],
+        }
+
+    def test_view_expression_integer_literal_comparison(self):
+        table = Table({"a": [1, 2, 3, 4], "b": [1.5, 2.5, 3.5, 4.5]})
+        expressions = {
+            "lt": '"a" < 3',
+            "lte": '"a" <= 3',
+            "gt": '"a" > 3',
+            "gte": '"a" >= 3',
+            "eq": '"a" == 3',
+            "ne": '"a" != 3',
+            "cross": '"a" < "b"',
+            "cast": '"a" == integer(3)',
+            "cond": 'if ("a" < 3) 10; else 100',
+        }
+        validated = table.validate_expressions(expressions)
+        assert validated["errors"] == {}
+        assert validated["expression_schema"] == {
+            "lt": "boolean",
+            "lte": "boolean",
+            "gt": "boolean",
+            "gte": "boolean",
+            "eq": "boolean",
+            "ne": "boolean",
+            "cross": "boolean",
+            "cast": "boolean",
+            "cond": "float",
+        }
+        view = table.view(expressions=expressions)
+        assert view.to_columns() == {
+            "a": [1, 2, 3, 4],
+            "b": [1.5, 2.5, 3.5, 4.5],
+            "lt": [True, True, False, False],
+            "lte": [True, True, True, False],
+            "gt": [False, False, False, True],
+            "gte": [False, False, True, True],
+            "eq": [False, False, True, False],
+            "ne": [True, True, False, True],
+            "cross": [True, True, True, True],
+            "cast": [False, False, True, False],
+            "cond": [10, 10, 100, 100],
+        }
+
+    def test_view_expression_incompatible_comparison_is_type_error(self):
+        table = Table({"a": [1, 2, 3, 4], "b": ["x", "y", "z", "w"]})
+        validated = table.validate_expressions(
+            {
+                "str_num": '"b" == 1',
+                "num_str": "\"a\" < 'x'",
+            }
+        )
+        assert validated["expression_schema"] == {}
+        assert validated["errors"] == {
+            "str_num": {
+                "column": 8,
+                "error_message": "Type Error - cannot compare string and float with '=='",
+                "line": 0,
+            },
+            "num_str": {
+                "column": 8,
+                "error_message": "Type Error - cannot compare integer and string with '<'",
+                "line": 0,
+            },
+        }
+
+    def test_view_expression_boolean_operators_cast(self):
+        table = Table({"a": [1, None, 0, 4], "b": ["x", None, "", "w"]})
+        expressions = {
+            "cond": 'if ("a") 10; else 100',
+            "tern": '"b" ? 1 : 0',
+            "logical": '"a" and "b"',
+            "negated": 'not("a")',
+        }
+        validated = table.validate_expressions(expressions)
+        assert validated["errors"] == {}
+        assert validated["expression_schema"] == {
+            "cond": "float",
+            "tern": "float",
+            "logical": "boolean",
+            "negated": "boolean",
+        }
+        view = table.view(expressions=expressions)
+        assert view.to_columns() == {
+            "a": [1, None, 0, 4],
+            "b": ["x", None, "", "w"],
+            "cond": [10, 100, 100, 10],
+            "tern": [1, 0, 1, 1],
+            "logical": [True, False, False, True],
+            "negated": [False, True, True, False],
+        }
 
     def test_view_expression_string_literal_compare_column(self):
         table = Table({"a": ["a", "a", "b", "c"]})

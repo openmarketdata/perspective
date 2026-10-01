@@ -1,0 +1,145 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+//! Argument dictionaries for the public `PerspectiveViewerElement` methods.
+//! Each derives `ts_rs::TS` so its TypeScript type is generated (and
+//! re-exported from the crate's `typescript_custom_section`) alongside the
+//! config types, rather than hand-maintained.
+
+use serde::Deserialize;
+use ts_rs::TS;
+
+use crate::config::ExportMethod;
+
+/// Selects the target panel of a panel-scoped `<perspective-viewer>` method;
+/// the active panel when `panel` is omitted.
+#[derive(Deserialize, Default, TS)]
+pub struct PanelOptions {
+    #[ts(optional)]
+    pub panel: Option<String>,
+}
+
+/// Options for the `restore()` method.
+#[derive(Deserialize, Default, TS)]
+pub struct RestoreOptions {
+    /// The target panel; the active panel when omitted.
+    #[ts(optional)]
+    pub panel: Option<String>,
+
+    /// When `true`, a config that was applied and then failed to render only
+    /// rejects the returned `Promise`, without raising the panel's visible
+    /// error state.
+    #[ts(optional)]
+    pub suppress_errors: Option<bool>,
+
+    /// When `true`, a `table` no loaded client hosts yet leaves the panel
+    /// empty and pending until the table is created, instead of the default
+    /// error.
+    #[ts(optional)]
+    pub wait_for_table: Option<bool>,
+}
+
+/// Options for the `restoreWorkspace()` method.
+#[derive(Deserialize, Default, TS)]
+pub struct RestoreWorkspaceOptions {
+    /// As `RestoreOptions::wait_for_table`, applied to every panel entry.
+    #[ts(optional)]
+    pub wait_for_table: Option<bool>,
+}
+
+/// Options for the `addPanel()` method.
+#[derive(Deserialize, Default, TS)]
+pub struct AddPanelOptions {
+    /// As `RestoreOptions::wait_for_table`.
+    #[ts(optional)]
+    pub wait_for_table: Option<bool>,
+}
+
+/// The `eject` argument: the loaded client to remove by name; the active
+/// panel's client when omitted.
+#[derive(Deserialize, Default, TS)]
+pub struct ClientOptions {
+    #[ts(optional)]
+    pub client: Option<String>,
+}
+
+/// The `download` / `export` / `copy` argument: the `ExportMethod` and target
+/// panel.
+#[derive(Deserialize, Default, TS)]
+pub struct ExportOptions {
+    #[ts(as = "Option<ExportMethod>")]
+    #[ts(optional)]
+    pub method: Option<String>,
+
+    #[ts(optional)]
+    pub panel: Option<String>,
+}
+
+/// The `getTable` argument: whether to `wait` for a `Table`, and the target
+/// panel.
+#[derive(Deserialize, Default, TS)]
+pub struct GetTableOptions {
+    #[ts(optional)]
+    pub wait: Option<bool>,
+
+    #[ts(optional)]
+    pub panel: Option<String>,
+}
+
+/// How `getView` resolves the `View` it returns.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum GetViewMode {
+    /// The panel's own bound `View`, which the viewer replaces on config
+    /// change and deletes on auto-pause or `delete()`; rejects when none is
+    /// bound.
+    #[default]
+    Live,
+
+    /// A caller-owned `View` built from the panel's effective config,
+    /// independent of the render lifecycle.
+    Clone,
+
+    /// `live` when the panel has a bound `View`, else `clone`.
+    Auto,
+}
+
+/// The `getView` argument: the `mode` and the target panel.
+#[derive(Deserialize, Default, TS)]
+pub struct GetViewOptions {
+    #[ts(optional)]
+    pub mode: Option<GetViewMode>,
+
+    #[ts(optional)]
+    pub panel: Option<String>,
+}
+
+/// The `getClient` argument: whether to `wait` for a `Client`, and the target
+/// panel.
+#[derive(Deserialize, Default, TS)]
+pub struct GetClientOptions {
+    #[ts(optional)]
+    pub wait: Option<bool>,
+
+    #[ts(optional)]
+    pub panel: Option<String>,
+}
+
+/// Options for the `saveWorkspace()` method.
+#[derive(Deserialize, Default, TS)]
+pub struct SaveWorkspaceOptions {
+    /// When `true`, the emitted `palette` is the full set the element
+    /// holds rather than only the values the panels reference.
+    #[serde(default)]
+    #[ts(optional)]
+    pub full_palette: Option<bool>,
+}

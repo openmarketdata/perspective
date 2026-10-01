@@ -24,7 +24,13 @@
 import type * as perspective from "@perspective-dev/client";
 import type { ColumnType } from "@perspective-dev/client/dist/esm/ts-rs/ColumnType.d.ts";
 import type { ViewConfig } from "@perspective-dev/client/dist/esm/ts-rs/ViewConfig.d.ts";
+import type {
+    ExpressionError,
+    TableDescription,
+} from "@perspective-dev/client";
+import type { ViewConfigUpdate } from "@perspective-dev/client/dist/esm/ts-rs/ViewConfigUpdate.d.ts";
 import type { ViewWindow } from "@perspective-dev/client/dist/esm/ts-rs/ViewWindow.d.ts";
+import type { WindowAggSpec } from "@perspective-dev/client/dist/esm/ts-rs/WindowAggSpec.d.ts";
 import type * as clickhouse from "@clickhouse/client-web";
 
 const NUMBER_AGGS = [
@@ -63,16 +69,70 @@ const STRING_AGGS = [
     "string_agg",
 ];
 
+// Window functions. Renamed from Perspective's `stddev`/`var` to the SQL
+// standard spellings DuckDB and ClickHouse both accept, since the advertised
+// name is now emitted verbatim.
+//
+// NOTE: this set is inherited from the DuckDB handler and has NOT been audited
+// against a live ClickHouse - see the aggregate lists below, which have the
+// same problem. ClickHouse's own navigation functions are `lagInFrame` /
+// `leadInFrame`, and its ranking set differs; both need verifying before being
+// advertised here.
+const FRAMES = ["rows", "range", "cumulative"];
+
+const WINDOW_AGGREGATES: WindowAggSpec[] = [
+    { name: "sum", frames: FRAMES, result_type: "float" },
+    { name: "avg", frames: FRAMES, result_type: "float" },
+    { name: "count", frames: FRAMES, result_type: "float" },
+    { name: "min", frames: FRAMES },
+    { name: "max", frames: FRAMES },
+    { name: "stddev_samp", frames: FRAMES, result_type: "float" },
+    { name: "var_samp", frames: FRAMES, result_type: "float" },
+    { name: "lag", offset: true },
+    { name: "lead", offset: true },
+    { name: "diff", offset: true, result_type: "float" },
+    { name: "rate", frames: ["range"], result_type: "float" },
+];
+
+const WINDOW_AGGREGATES_ANY: WindowAggSpec[] = [
+    { name: "count", frames: FRAMES, result_type: "float" },
+    { name: "min", frames: FRAMES },
+    { name: "max", frames: FRAMES },
+    { name: "lag", offset: true },
+    { name: "lead", offset: true },
+];
+
 const FILTER_OPS = [
     "==",
     "!=",
-    "LIKE",
     "IS DISTINCT FROM",
     "IS NOT DISTINCT FROM",
     ">=",
     "<=",
     ">",
     "<",
+    "is null",
+    "is not null",
+];
+
+// Perspective's canonical string ops (translated to `ILIKE` / `match` by the
+// SQL builder), plus ClickHouse's raw infix pattern ops spliced verbatim.
+const STRING_FILTER_OPS = [
+    ...FILTER_OPS,
+    "begins with",
+    "not begins with",
+    "contains",
+    "not contains",
+    "ends with",
+    "not ends with",
+    "matches",
+    "not matches",
+    "in",
+    "not in",
+    "LIKE",
+    "NOT LIKE",
+    "ILIKE",
+    "NOT ILIKE",
 ];
 
 function duckdbTypeToPsp(name: string): ColumnType {
@@ -214,20 +274,35 @@ export class ClickhouseHandler implements perspective.VirtualServerHandler {
         this.sqlBuilder = new mod!.GenericSQLVirtualServerModel({
             create_entity: "VIEW",
             grouping_fn: "GROUPING",
+            column_separator: "|",
+            backslash_escaped_literals: true,
+            regex_fn: "match",
         });
     }
 
-    getFeatures() {
+    getFeatures(): perspective.Features {
         return {
             group_by: true,
             split_by: false,
             sort: true,
             expressions: true,
+            // ClickHouse has no stable `rowid`, so natural-order windows
+            // are unsupported.
+            unordered: true,
+            window_aggregates: {
+                // `ema` is recursive and has no SQL window translation.
+                integer: WINDOW_AGGREGATES,
+                float: WINDOW_AGGREGATES,
+                string: WINDOW_AGGREGATES_ANY,
+                date: WINDOW_AGGREGATES_ANY,
+                datetime: WINDOW_AGGREGATES_ANY,
+                boolean: WINDOW_AGGREGATES_ANY,
+            },
             group_rollup_mode: ["rollup", "flat", "total"],
             filter_ops: {
                 integer: FILTER_OPS,
                 float: FILTER_OPS,
-                string: FILTER_OPS,
+                string: STRING_FILTER_OPS,
                 boolean: FILTER_OPS,
                 date: FILTER_OPS,
                 datetime: FILTER_OPS,
@@ -283,18 +358,118 @@ export class ClickhouseHandler implements perspective.VirtualServerHandler {
         return Number(results[0]["COUNT()"]);
     }
 
-    async tableMakeView(tableId: string, viewId: string, config: ViewConfig) {
-        const query = this.sqlBuilder.tableMakeView(tableId, viewId, config);
+    async tableMakeView(
+        tableId: string,
+        viewId: string,
+        config: ViewConfigUpdate,
+    ) {
+        // Window order keys need column types for `range` frame emission.
+        const schema = Object.keys(config.windows ?? {}).length
+            ? await this.tableSchema(tableId)
+            : undefined;
+
+        const query = this.sqlBuilder.tableMakeView(
+            tableId,
+            viewId,
+            config,
+            schema,
+        );
+
         await runQuery(this.db, query, { execute: true });
     }
 
-    async tableValidateExpression(tableId: string, expression: string) {
-        const query = this.sqlBuilder.tableValidateExpression(
+    async tableDescribe(
+        tableId: string,
+        config: ViewConfig,
+    ): Promise<TableDescription> {
+        let expression_schema = {} as Record<string, ColumnType>;
+        const expressions_query = this.sqlBuilder.expressionsDescribe(
             tableId,
-            expression,
+            config,
         );
+
+        if (expressions_query !== undefined) {
+            try {
+                expression_schema = await this.describeQuery(expressions_query);
+            } catch (error) {
+                return await this.attributeExpressionErrors(
+                    tableId,
+                    config,
+                    error,
+                );
+            }
+        }
+
+        const schema = Object.keys(config.windows ?? {}).length
+            ? await this.tableSchema(tableId)
+            : undefined;
+
+        const view_query = this.sqlBuilder.tableDescribe(
+            tableId,
+            config,
+            schema,
+        );
+
+        let view_schema = {} as Record<string, ColumnType>;
+        if (view_query !== undefined) {
+            try {
+                view_schema = await this.describeQuery(view_query);
+            } catch (error) {
+                return { config_error: errorMessage(error) };
+            }
+        }
+
+        return { expression_schema, view_schema };
+    }
+
+    /** The planned result columns of one `DESCRIBE` query. */
+    private async describeQuery(query: string) {
         const results = await runQuery(this.db, query);
-        return duckdbTypeToPsp(results[0]["type"]) as ColumnType;
+        const schema = {} as Record<string, ColumnType>;
+        for (const result of results) {
+            if (!result.name.startsWith("__")) {
+                schema[result.name] = duckdbTypeToPsp(
+                    result.type,
+                ) as ColumnType;
+            }
+        }
+
+        return schema;
+    }
+
+    /** Plans each expression on its own to name the ones at fault. */
+    private async attributeExpressionErrors(
+        tableId: string,
+        config: ViewConfig,
+        error: unknown,
+    ): Promise<TableDescription> {
+        const expression_schema = {} as Record<string, ColumnType>;
+        const expression_errors = {} as Record<string, ExpressionError>;
+        for (const [name, expression] of Object.entries(config.expressions)) {
+            const query = this.sqlBuilder.expressionDescribe(
+                tableId,
+                expression,
+            );
+
+            try {
+                const results = await runQuery(this.db, query);
+                expression_schema[name] = duckdbTypeToPsp(
+                    results[0]["type"],
+                ) as ColumnType;
+            } catch (error) {
+                expression_errors[name] = {
+                    error_message: errorMessage(error),
+                    line: 0,
+                    column: 0,
+                };
+            }
+        }
+
+        if (Object.keys(expression_errors).length === 0) {
+            return { config_error: errorMessage(error) };
+        }
+
+        return { expression_schema, expression_errors };
     }
 
     async viewDelete(viewId: string) {
@@ -349,4 +524,8 @@ export class ClickhouseHandler implements perspective.VirtualServerHandler {
             }
         }
     }
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

@@ -678,59 +678,269 @@ function validate_typed_array(typed_array, column_data) {
             view.delete();
             table.delete();
         });
+
+        test("Construct a table from an indexed view inherits the index", async function () {
+            const table = await perspective.table(
+                [
+                    { x: 1, y: "a" },
+                    { x: 2, y: "b" },
+                    { x: 3, y: "c" },
+                ],
+                { index: "x" },
+            );
+
+            const view = await table.view();
+            const table2 = await perspective.table(view);
+            expect(await table2.get_index()).toEqual("x");
+            const view2 = await table2.view();
+            let resolve;
+            const next = () =>
+                new Promise((x) => {
+                    resolve = x;
+                });
+
+            await view2.on_update(() => resolve());
+            let promise = next();
+            await table.update([{ x: 2, y: "bb" }]);
+            await promise;
+            expect(await view2.to_json()).toEqual(await view.to_json());
+            expect(await view2.to_json()).toEqual([
+                { x: 1, y: "a" },
+                { x: 2, y: "bb" },
+                { x: 3, y: "c" },
+            ]);
+
+            promise = next();
+            await table.remove([1]);
+            await promise;
+            expect(await view2.to_json()).toEqual(await view.to_json());
+            expect(await view2.to_json()).toEqual([
+                { x: 2, y: "bb" },
+                { x: 3, y: "c" },
+            ]);
+
+            await view2.delete();
+            await table2.delete();
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Construct a table from an indexed view mirrors replace and clear", async function () {
+            const table = await perspective.table(
+                [
+                    { x: 1, y: "a" },
+                    { x: 2, y: "b" },
+                    { x: 3, y: "c" },
+                ],
+                { index: "x" },
+            );
+
+            const view = await table.view();
+            const table2 = await perspective.table(view);
+            const view2 = await table2.view();
+            await table.replace([
+                { x: 2, y: "bb" },
+                { x: 4, y: "d" },
+            ]);
+
+            await expect
+                .poll(() => view2.to_json())
+                .toEqual([
+                    { x: 2, y: "bb" },
+                    { x: 4, y: "d" },
+                ]);
+
+            await table.clear();
+            await expect.poll(() => view2.to_json()).toEqual([]);
+            await table.update([{ x: 5, y: "e" }]);
+            await expect
+                .poll(() => view2.to_json())
+                .toEqual([{ x: 5, y: "e" }]);
+            await view2.delete();
+            await table2.delete();
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Construct a table from a pivoted view stays unindexed", async function () {
+            const table = await perspective.table(
+                [
+                    { x: 1, y: "a" },
+                    { x: 2, y: "b" },
+                ],
+                { index: "x" },
+            );
+
+            const view = await table.view({ group_by: ["y"] });
+            const table2 = await perspective.table(view);
+            expect(await table2.get_index()).toBeUndefined();
+            await table2.delete();
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Construct a table from a view without the index column stays unindexed", async function () {
+            const table = await perspective.table(
+                [
+                    { x: 1, y: "a" },
+                    { x: 2, y: "b" },
+                ],
+                { index: "x" },
+            );
+
+            const view = await table.view({ columns: ["y"] });
+            const table2 = await perspective.table(view);
+            expect(await table2.get_index()).toBeUndefined();
+            await table2.delete();
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Construct a table from a limit table's view inherits the limit", async function () {
+            const table = await perspective.table(
+                [
+                    { x: 1, y: "a" },
+                    { x: 2, y: "b" },
+                ],
+                { limit: 2 },
+            );
+
+            const view = await table.view();
+            const table2 = await perspective.table(view);
+            expect(await table2.get_limit()).toEqual(2);
+            const view2 = await table2.view();
+            let resolve;
+            const promise = new Promise((x) => {
+                resolve = x;
+            });
+
+            await view2.on_update(() => resolve());
+            await table.update([{ x: 3, y: "c" }]);
+            await promise;
+            expect(await view2.to_json()).toEqual(await view.to_json());
+            expect(await table2.size()).toEqual(2);
+            await view2.delete();
+            await table2.delete();
+            await view.delete();
+            await table.delete();
+        });
     });
 
     test.describe("Errors", function () {
         test("Table constructor should throw an exception and reject promise", async function () {
-            expect.assertions(1);
-            perspective.table([1, 2, 3]).catch((error) => {
-                expect(error.message).toContain(
-                    "Abort(): Cannot determine data types without column names!\n",
-                );
-            });
+            await expect(perspective.table([1, 2, 3])).rejects.toThrow(
+                "Abort(): Cannot determine data types without column names!\n",
+            );
         });
 
         test("View constructor should throw an exception and reject promise", async function () {
-            expect.assertions(1);
             const table = await perspective.table(int_float_string_data);
-            table
-                .view({
-                    group_by: ["abcd"],
-                })
-                .catch((error) => {
-                    expect(error.message).toContain(
-                        "Abort(): Invalid column 'abcd' found in View group_by.\n",
-                    );
-                    table.delete();
-                });
+            await expect(table.view({ group_by: ["abcd"] })).rejects.toThrow(
+                "Abort(): Invalid column 'abcd' found in View group_by.\n",
+            );
+
+            await table.delete();
         });
 
         test("Table constructor should throw an exception on await", async function () {
-            expect.assertions(1);
-
+            let error;
             try {
                 await perspective.table([1, 2, 3]);
-            } catch (error) {
-                expect(error.message).toContain(
-                    "Abort(): Cannot determine data types without column names!\n",
-                );
+            } catch (e) {
+                error = e;
             }
+
+            expect(error.message).toContain(
+                "Abort(): Cannot determine data types without column names!\n",
+            );
         });
 
         test("View constructor should throw an exception on await", async function () {
-            expect.assertions(1);
             const table = await perspective.table(int_float_string_data);
-
+            let error;
             try {
-                await table.view({
-                    group_by: ["abcd"],
-                });
-            } catch (error) {
-                expect(error.message).toContain(
-                    "Abort(): Invalid column 'abcd' found in View group_by.\n",
-                );
-                table.delete();
+                await table.view({ group_by: ["abcd"] });
+            } catch (e) {
+                error = e;
             }
+
+            expect(error.message).toContain(
+                "Abort(): Invalid column 'abcd' found in View group_by.\n",
+            );
+
+            await table.delete();
+        });
+
+        test("Table constructor pads short trailing columns with null", async function () {
+            const table = await perspective.table({
+                overflow: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+                short: [1],
+            });
+            const view = await table.view();
+            const result = await view.to_columns();
+            expect(result).toEqual({
+                overflow: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+                short: [1, null, null, null, null, null, null, null, null],
+            });
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Table constructor pads short leading columns with null", async function () {
+            const table = await perspective.table({
+                short: [1],
+                overflow: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            });
+            const view = await table.view();
+            const result = await view.to_columns();
+            expect(result).toEqual({
+                short: [1, null, null, null, null, null, null, null, null],
+                overflow: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            });
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Table constructor handles columns of equal length", async function () {
+            const table = await perspective.table({
+                a: [1, 2, 3],
+                b: ["x", "y", "z"],
+            });
+            const view = await table.view();
+            const result = await view.to_columns();
+            expect(result).toEqual({
+                a: [1, 2, 3],
+                b: ["x", "y", "z"],
+            });
+            await view.delete();
+            await table.delete();
+        });
+
+        test("Table update pads short columns with null", async function () {
+            const table = await perspective.table({
+                a: "integer",
+                b: "integer",
+            });
+            await table.update({
+                a: [1, 2, 3, 4, 5],
+                b: [1],
+            });
+            const view = await table.view();
+            const result = await view.to_columns();
+            expect(result).toEqual({
+                a: [1, 2, 3, 4, 5],
+                b: [1, null, null, null, null],
+            });
+
+            // The table must remain usable for subsequent updates.
+            await table.update({ a: [10], b: [20] });
+            const result2 = await view.to_columns();
+            expect(result2).toEqual({
+                a: [1, 2, 3, 4, 5, 10],
+                b: [1, null, null, null, null, 20],
+            });
+            await view.delete();
+            await table.delete();
         });
     });
 
@@ -888,6 +1098,42 @@ function validate_typed_array(typed_array, column_data) {
             table.delete();
         });
 
+        test("column introduced by a later record", async function () {
+            var table = await perspective.table(`{"a":1}\n{"a":2,"b":3}`, {
+                format: "ndjson",
+            });
+
+            expect(await table.schema()).toEqual({
+                a: "integer",
+                b: "integer",
+            });
+
+            var view = await table.view();
+            expect(await view.to_columns()).toEqual({
+                a: [1, 2],
+                b: [null, 3],
+            });
+
+            view.delete();
+            table.delete();
+        });
+
+        test("column introduced as null then typed", async function () {
+            var table = await perspective.table(
+                `{"a":1,"b":null}\n{"a":2,"b":"x"}`,
+                { format: "ndjson" },
+            );
+
+            var view = await table.view();
+            expect(await view.to_columns()).toEqual({
+                a: [1, 2],
+                b: [null, "x"],
+            });
+
+            view.delete();
+            table.delete();
+        });
+
         test("date types", async function () {
             const ndjson = [];
             for (const row of data_4) {
@@ -917,6 +1163,20 @@ function validate_typed_array(typed_array, column_data) {
             expect(result).toEqual([{ v: +data_4[0]["v"] }]);
             view.delete();
             table.delete();
+        });
+
+        test("Handles many objects without newline separators", async function () {
+            const expected = [];
+            for (let i = 0; i < 64; i++) {
+                expected.push({ a: `row-${i}` });
+            }
+            const data = expected.map(JSON.stringify).join("");
+            const table = await perspective.table(data, { format: "ndjson" });
+            const view = await table.view();
+            expect(await table.size()).toEqual(64);
+            expect(await view.to_json()).toEqual(expected);
+            await view.delete();
+            await table.delete();
         });
     });
 
@@ -989,12 +1249,21 @@ function validate_typed_array(typed_array, column_data) {
         });
 
         test("Arrow Lists constructor", async function () {
-            const table = await perspective.table(arrows.lists_arrow.slice());
+            const table = await perspective.table(arrows.lists_arrow.slice(), {
+                list_flatten: "stringify",
+            });
+
             const view = await table.view();
             const result = await view.to_columns();
             expect(result).toEqual(arrow_lists_data);
             view.delete();
             table.delete();
+        });
+
+        test("Arrow Lists constructor rejects a ragged zip", async function () {
+            await expect(
+                perspective.table(arrows.lists_arrow.slice()),
+            ).rejects.toThrow(/Cannot zip list columns/);
         });
 
         test("Arrow dictionary constructor", async function () {

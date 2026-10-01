@@ -15,20 +15,18 @@ use std::rc::Rc;
 
 use chrono::{Datelike, NaiveDate, TimeZone, Utc};
 use perspective_client::config::*;
-use perspective_js::utils::ApiFuture;
 use wasm_bindgen::JsCast;
 use web_sys::*;
 use yew::prelude::*;
 
-use crate::components::containers::dragdrop_list::*;
-use crate::components::containers::select::*;
+use crate::components::dragdrop_list::*;
 use crate::components::filter_dropdown::FilterDropDownElement;
-use crate::components::style::LocalStyle;
 use crate::components::type_icon::TypeIcon;
-use crate::css;
 use crate::presentation::Presentation;
 use crate::renderer::*;
 use crate::session::*;
+use crate::tasks::apply_and_render;
+use crate::ui::{Select, SelectItem};
 use crate::utils::*;
 
 #[derive(Clone, Properties)]
@@ -242,9 +240,12 @@ impl Component for FilterColumn {
             let event_name = ctx.props().filter.column().to_owned();
             let presentation = ctx.props().presentation.clone();
             move |event: DragEvent| {
-                presentation.set_drag_image(&event).unwrap();
-                presentation
-                    .notify_drag_start(event_name.to_string(), DragEffect::Move(DragTarget::Filter))
+                if presentation.set_drag_image(&event) {
+                    presentation.notify_drag_start(
+                        event_name.to_string(),
+                        DragEffect::Move(DragTarget::Filter),
+                    )
+                }
             }
         });
 
@@ -348,7 +349,6 @@ impl Component for FilterColumn {
                 ondragstart={dragstart}
                 ondragend={dragend}
             >
-                <LocalStyle href={css!("filter-item")} />
                 <div class="pivot-column-border">
                     <span class="drag-handle icon" />
                     // <TypeIcon ty={ColumnType::String} />
@@ -451,13 +451,8 @@ impl FilterColumnProps {
             ..ViewConfigUpdate::default()
         };
 
-        if self.session.update_view_config(update).is_ok() {
-            let session = self.session.clone();
-            let renderer = self.renderer.clone();
-            ApiFuture::spawn(async move {
-                renderer.apply_pending_plugin()?;
-                renderer.draw(session.validate().await?.create_view()).await
-            });
+        if let Ok(task) = apply_and_render(&self.session, &self.renderer, update) {
+            spawn_owned("filter-column", task);
         }
     }
 
@@ -529,13 +524,8 @@ impl FilterColumnProps {
                 ..ViewConfigUpdate::default()
             };
 
-            if self.session.update_view_config(update).is_ok() {
-                let session = self.session.clone();
-                let renderer = self.renderer.clone();
-                ApiFuture::spawn(async move {
-                    renderer.apply_pending_plugin()?;
-                    renderer.draw(session.validate().await?.create_view()).await
-                });
+            if let Ok(task) = apply_and_render(&self.session, &self.renderer, update) {
+                spawn_owned("filter-column", task);
             }
         }
     }

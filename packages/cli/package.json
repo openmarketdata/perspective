@@ -1,7 +1,26 @@
 {
     "name": "@perspective-dev/cli",
-    "version": "4.5.1",
-    "description": "Perspective.js CLI",
+    "version": "5.5.1",
+    "description": "Command line tool for Perspective: convert between Arrow, CSV and JSON, or host a local file as an interactive data grid, pivot table and charts.",
+    "keywords": [
+        "perspective",
+        "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
+        "charts",
+        "visualization",
+        "dashboard",
+        "analytics",
+        "bi",
+        "streaming",
+        "real-time",
+        "wasm",
+        "webassembly",
+        "arrow",
+        "cli"
+    ],
+    "homepage": "https://perspective-dev.github.io",
     "main": "src/js/index.js",
     "publishConfig": {
         "access": "public"
@@ -22,15 +41,14 @@
         "perspective": "perspective"
     },
     "dependencies": {
-        "@perspective-dev/client": "workspace:",
-        "@perspective-dev/viewer": "workspace:",
-        "@perspective-dev/viewer-charts": "workspace:",
-        "@perspective-dev/viewer-datagrid": "workspace:",
-        "@perspective-dev/workspace": "workspace:",
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
+        "@perspective-dev/viewer-charts": "workspace:^",
+        "@perspective-dev/viewer-datagrid": "workspace:^",
         "commander": "catalog:",
         "puppeteer": "catalog:"
     },
     "devDependencies": {
-        "@perspective-dev/test": "workspace:"
+        "@perspective-dev/test": "workspace:^"
     }
 }

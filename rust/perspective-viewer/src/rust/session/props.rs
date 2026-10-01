@@ -19,14 +19,18 @@ use crate::session::column_defaults_update::ViewConfigUpdateExt;
 use crate::session::drag_drop_update::ViewConfigExt as DragDropExt;
 use crate::session::metadata::SessionMetadataRc;
 use crate::session::replace_expression_update::ViewConfigExt as ReplaceExprExt;
-use crate::session::{ColumnStats, TableErrorState, ViewStats};
+use crate::session::{ColumnStats, TableErrorState};
 use crate::utils::*;
 
+/// The panel's table binding as the status indicator and chrome see it:
+/// bound, a `load()` in flight, or a named table awaiting its host (see
+/// `Session::pending_table`).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum TableLoadState {
     #[default]
     Loaded,
     Loading,
+    Pending,
 }
 
 /// Value-semantic snapshot of the session state read by the root component.
@@ -39,8 +43,9 @@ pub struct SessionProps {
     /// The current `ViewConfig` driving the active `View`.
     pub config: PtrEqRc<ViewConfig>,
 
-    /// Row/column statistics for the status bar.
-    pub stats: Option<ViewStats>,
+    /// Whether the view stats carry table dimensions yet, the status
+    /// indicator's loaded/uninitialized split.
+    pub has_table_cells: bool,
 
     /// `true` if a `Table` has been loaded into this session.
     pub has_table: Option<TableLoadState>,
@@ -145,6 +150,7 @@ impl SessionProps {
     ) {
         config_update.set_update_column_defaults(
             &self.metadata,
+            &self.config,
             &self.all_columns().into_iter().map(Some).collect::<Vec<_>>(),
             config_static,
         )

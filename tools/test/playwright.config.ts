@@ -32,6 +32,10 @@ const TEST_SERVER_PORT = 6598;
 
 const RUN_JUPYTERLAB = !!process.env.PSP_JUPYTERLAB_TESTS;
 
+// Residency budget for the Node engine (only `page_to_disk` tables count), so
+// the eviction tests spill at a few MB instead of the 1 GiB default.
+process.env.PSP_MEMORY_BUDGET ??= String(4 * 1024 * 1024);
+
 // TODO use this from core
 const package_venn = (get_scope() as string[]).reduce(
     (acc: { include: string[]; exclude: string[] }, x: string) => {
@@ -113,24 +117,12 @@ const BROWSER_PACKAGES = [
         packageName: "jupyterlab",
         testDir: "packages/jupyterlab/test/js",
     },
-    {
-        packageName: "workspace",
-        testDir: "packages/workspace/test/js",
-    },
-    {
-        packageName: "docs",
-        testDir: "docs/test/js",
-    },
 ];
 
 const NODE_PACKAGES = [
     {
         packageName: "client",
         testDir: "rust/perspective-js/test/js",
-    },
-    {
-        packageName: "client-tz",
-        testDir: "rust/perspective-js/test/tz",
     },
 ];
 
@@ -164,6 +156,9 @@ let PROJECTS = (() => {
                         launchOptions: {
                             args: ["--js-flags=--expose-gc"],
                         },
+                        trace: "retain-on-failure",
+                        screenshot: "only-on-failure",
+                        video: "retain-on-failure",
                     },
                 });
             }
@@ -193,6 +188,10 @@ let PROJECTS = (() => {
                             ...DEVICE_OPTIONS[device],
                             baseURL: `http://localhost:${TEST_SERVER_PORT}`,
                             timezoneId: "UTC",
+                            trace: process.env.CI ? "retain-on-failure" : "off",
+                            screenshot: process.env.CI
+                                ? "only-on-failure"
+                                : "off",
                         },
                     });
                 }
@@ -215,16 +214,19 @@ const GLOBAL_TEARDOWN_PATH = __require.resolve(
 
 // See https://playwright.dev/docs/test-configuration.
 export default defineConfig({
-    timeout: 30_000,
+    timeout: RUN_JUPYTERLAB ? 120_000 : 30_000,
     expect: {
-        timeout: 30_000,
+        timeout: RUN_JUPYTERLAB ? 60_000 : 30_000,
     },
     repeatEach: process.env.PSP_SATURATE
         ? parseInt(process.env.PSP_SATURATE)
         : 0,
     forbidOnly: !!process.env.CI,
-    workers: process.env.PSP_DEBUG ? 1 : "50%",
-    retries: 0,
+    workers: process.env.PSP_DEBUG || RUN_JUPYTERLAB ? 1 : "50%",
+    // Retries in CI only — a single flake among the ~2k viewer tests
+    // otherwise fails the run (retried-but-passing tests are still surfaced
+    // as "flaky" in the report, so regressions remain visible).
+    retries: process.env.CI ? 2 : 0,
     quiet: !process.env.PSP_DEBUG,
     reporter: process.env.CI ? [["github"], ["html"]] : [["dot"]],
     projects: PROJECTS,

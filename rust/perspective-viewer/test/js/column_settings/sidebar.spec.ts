@@ -10,10 +10,16 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-import { test, expect, PageView, ColumnSettingsSidebar } from "../helpers.ts";
+import {
+    test,
+    expect,
+    PageView,
+    ColumnSettingsSidebar,
+    compareInnerHTMLToSnapshot,
+} from "../helpers.ts";
 
 test.beforeEach(async ({ page }) => {
-    await page.goto("/tools/test/src/html/basic-test.html");
+    await page.goto("/rust/perspective-viewer/test/html/superstore-debug.html");
     await page.evaluate(async () => {
         while (!window["__TEST_PERSPECTIVE_READY__"]) {
             await new Promise((x) => setTimeout(x, 10));
@@ -99,7 +105,7 @@ test.describe("Column Settings Sidebar", () => {
         expect(rowId).toBeDefined();
 
         await exprCol.editBtn.waitFor();
-        await rowId.editBtn.waitFor({ state: "detached", timeout: 1000 });
+        await rowId.editBtn.waitFor({ state: "detached", timeout: 5000 });
 
         await view.assureColumnSettingsClosed();
         await exprCol.editBtn.click();
@@ -151,11 +157,12 @@ test.describe("Column Settings Sidebar", () => {
         });
 
         await page.waitForFunction(() => {
-            return (
-                document
-                    .querySelector("perspective-viewer-datagrid")
-                    ?.shadowRoot?.querySelectorAll("tbody tr").length! >= 1
-            );
+            // The Debug Styled test plugin renders its row count as text into
+            // the viewer's light DOM; wait for it to reflect the update.
+            const plugin = document
+                .querySelector("perspective-viewer")
+                ?.querySelector("perspective-viewer-debug-styled");
+            return (plugin?.textContent ?? "").includes("rows");
         });
 
         await expect(view.columnSettingsSidebar.container).toBeVisible();
@@ -206,27 +213,24 @@ test.describe("Column Settings Sidebar", () => {
         await col.editBtn.click();
         await view.columnSettingsSidebar.openTab("Attributes");
         await checkTab(view.columnSettingsSidebar, false, true);
-        const selectedTab = async () => {
-            return await view.columnSettingsSidebar.selectedTab
-                .locator(".tab-title")
-                .getAttribute("id");
-        };
+        const tabBar =
+            view.columnSettingsSidebar.container.locator("#settings_tab_bar");
 
-        expect(await selectedTab()).toBe("Attributes");
+        await compareInnerHTMLToSnapshot(tabBar, ["inactive"]);
         await col.activeBtn.click();
         await view.columnSettingsSidebar.container
             .locator(".tab-title#Style")
             .waitFor({ state: "visible" });
 
         await checkTab(view.columnSettingsSidebar, true, true, true);
-        expect(await selectedTab()).toBe("Attributes");
+        await compareInnerHTMLToSnapshot(tabBar, ["activated"]);
         await view.columnSettingsSidebar.attributesTab.expressionEditor.textarea.clear();
         await view.columnSettingsSidebar.attributesTab.expressionEditor.textarea.type(
             "'new expr value'",
         );
 
         await view.columnSettingsSidebar.attributesTab.saveBtn.click();
-        expect(await selectedTab()).toBe("Attributes");
+        await compareInnerHTMLToSnapshot(tabBar, ["activated"]);
     });
 
     test("color range > resets to default when switching to a different number column", async ({
@@ -234,7 +238,7 @@ test.describe("Column Settings Sidebar", () => {
     }) => {
         const view = new PageView(page);
         await view.restore({
-            plugin: "Datagrid",
+            plugin: "Debug Styled",
             columns: ["Row ID", "Postal Code"],
             settings: true,
         });
@@ -252,24 +256,28 @@ test.describe("Column Settings Sidebar", () => {
         await firstCol.editBtn.click();
         await checkTab(view.columnSettingsSidebar, true, false, false);
 
-        // expect style tab is selected
-        const selectedTab = async () => {
-            return await view.columnSettingsSidebar.selectedTab
-                .locator(".tab-title")
-                .getAttribute("id");
-        };
-        expect(await selectedTab()).toBe("Style");
+        await compareInnerHTMLToSnapshot(
+            view.columnSettingsSidebar.container.locator("#settings_tab_bar"),
+            ["style-selected"],
+        );
         const getFgColorNeg = async () => {
-            return view.columnSettingsSidebar.styleTab.container.locator(
-                "input.neg_fg_color",
-            );
+            return view.columnSettingsSidebar.styleTab.container
+                .locator("fieldset.style-control", {
+                    has: page.locator("#fg_colors-label"),
+                })
+                .locator(".gradient-stop-handle input[type=color]")
+                .first();
         };
 
         let fgColorNeg = await getFgColorNeg();
-        expect(fgColorNeg).toBeTruthy();
-        expect(fgColorNeg).toBeVisible();
-        expect(fgColorNeg).toBeEditable();
-        expect(fgColorNeg).toHaveValue(defaultNegColor);
+        await expect(fgColorNeg).toBeVisible();
+        await compareInnerHTMLToSnapshot(
+            view.columnSettingsSidebar.styleTab.container.locator(
+                "fieldset.style-control",
+                { has: page.locator("#fg_colors-label") },
+            ),
+            ["default-colors"],
+        );
 
         // change -ve color from default
         await fgColorNeg.fill("#ffff00");

@@ -18,10 +18,14 @@ import {
     sourceColumn,
     type NumberFormatConfig,
     type DateFormatConfig,
-} from "@perspective-dev/viewer/src/ts/column-format.js";
+} from "@perspective-dev/viewer/column-format";
 import type { ColumnDataMap } from "../data/view-reader";
 import { LazyRowFetcher } from "../data/lazy-row";
-import { formatTickValue, formatDateTickValue } from "../layout/ticks";
+import {
+    CHART_DATE_DEFAULTS,
+    CHART_DATETIME_DEFAULTS,
+    CHART_NUMBER_DEFAULTS,
+} from "../plugin/format-defaults";
 import type { WebGLContextManager } from "../webgl/context-manager";
 import {
     ZoomController,
@@ -41,51 +45,37 @@ import {
     type UserClickPayload,
     type UserSelectPayload,
 } from "../interaction/tooltip-controller";
+import { LegendController } from "../interaction/legend-controller";
 import type { PerspectiveClickDetail } from "../event-detail";
 import type { ViewConfig } from "@perspective-dev/client";
 import { resolveThemeFromVars, type Theme } from "../theme/theme";
+import { applyColumnColorOverrides } from "../theme/overrides";
 import { requestRender as scheduleRender } from "../render/scheduler";
 
-// TODO I don't know if this is the behavior we want. On the plus side, this
-// ad-hoc formatter scales well to small and large data ranges, making a good
-// guess at the right format without user input. On the minus side, this
-// behavior is inconsistent with datagrid and the rest of the app, and the ad-hoc
-// surprising behavior when overriding one field in `number_format` and suddenly
-// the entire formatter is replaced.
-const REGRESSION_BEHAVIOR = true;
-
 /**
- * Locale-aware fallback formatter applied to numeric tooltip / legend
- * values when the column has no `number_format` configured. Two
- * fractional digits matches the legacy datagrid default and gives
- * tooltips a stable display width.
+ * Fallback formatter applied to numeric tooltip / legend values when the
+ * column has no `number_format` configured.
  */
 const DEFAULT_VALUE_FORMATTER: (v: number) => string = ((): ((
     v: number,
 ) => string) => {
-    if (REGRESSION_BEHAVIOR) {
-        return formatTickValue;
-    } else {
-        const intl = createNumberFormatter("float");
-        return (v) => intl.format(v);
-    }
+    const intl = createNumberFormatter(
+        "float",
+        undefined,
+        CHART_NUMBER_DEFAULTS,
+    );
+    return (v) => intl.format(v);
 })();
 
 /**
- * Locale-aware fallback formatter for datetime tooltip / legend values
- * when the column has no `date_format` configured. Uses the locale
- * default (no `dateStyle` / `timeStyle`) to match what most users
- * expect from an `Intl.DateTimeFormat()` constructed with no options.
+ * Fallback formatter for datetime tooltip / legend values when the
+ * column has no `date_format` configured.
  */
 const DEFAULT_DATETIME_FORMATTER: (v: number) => string = ((): ((
     v: number,
 ) => string) => {
-    if (REGRESSION_BEHAVIOR) {
-        return formatDateTickValue;
-    } else {
-        const intl = createDatetimeFormatter();
-        return (v) => intl.format(v);
-    }
+    const intl = createDatetimeFormatter(undefined, CHART_DATETIME_DEFAULTS);
+    return (v) => intl.format(v);
 })();
 
 /**
@@ -141,6 +131,24 @@ export abstract class AbstractChart implements ChartImplementation {
     _glManager: WebGLContextManager | null = null;
     _gridlineCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
     _chromeCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
+    _overlayPresenter: (() => void) | null = null;
+
+    /**
+     * 2D-canvas draw closures collected during `_fullRender` (the GL
+     * pass) and flushed by {@link _flush2D} *after* the scheduler's
+     * `awaitGpuFence`. Deferring the gridline/chrome draws past the GPU
+     * fence stops the 2D placeholder canvases from pushing a resized
+     * frame to the compositor a frame ahead of the GL present — the
+     * visible GL/2D misalignment on resize.
+     *
+     * Renderers wrap their 2D drawing in {@link _defer2D}; the closures
+     * capture the exact per-frame locals (layout, ticks, theme) so no
+     * state needs to be recomputed or replayed from cache at flush time.
+     * Reset at the start of every GL pass (see {@link requestRender} /
+     * {@link renderFrameSync}) so a `_fullRender` that throws mid-way
+     * can't leak stale closures into the next frame.
+     */
+    _deferred2D: Array<() => void> = [];
 
     /**
      * Host-supplied CSS-variable map. The host snapshots its DOM via
@@ -219,6 +227,7 @@ export abstract class AbstractChart implements ChartImplementation {
      */
     _pluginConfig: PluginConfig = { ...DEFAULT_PLUGIN_CONFIG };
 
+    _legend = new LegendController();
     _tooltip = new TooltipController();
 
     /**
@@ -242,11 +251,15 @@ export abstract class AbstractChart implements ChartImplementation {
 
     /**
      * Cached resolved theme — populated on first `_resolveTheme()` call,
-     * cleared by `invalidateTheme()` (driven from `plugin.restyle()`).
-     * `getComputedStyle` / `getPropertyValue` reads cost ~100µs each;
-     * zoom/hover dispatch redraws at 60Hz so we resolve once and reuse.
+     * cleared by `invalidateTheme()` (driven from `plugin.restyle()`)
+     * and by `setColumnsConfig` (per-column color overrides patch the
+     * resolved theme). `getComputedStyle` / `getPropertyValue` reads
+     * cost ~100µs each; zoom/hover dispatch redraws at 60Hz so we
+     * resolve once and reuse.
      */
     _theme: Theme | null = null;
+
+    _themeColorColumn: string | null = null;
 
     /**
      * On-demand single-row fetcher used by lazy tooltip column
@@ -268,6 +281,18 @@ export abstract class AbstractChart implements ChartImplementation {
 
     setChromeCanvas(canvas: HTMLCanvasElement | OffscreenCanvas): void {
         this._chromeCanvas = canvas;
+    }
+
+    setOverlayPresenter(cb: () => void): void {
+        this._overlayPresenter = cb;
+    }
+
+    /**
+     * Present a chrome-overlay repaint that ran outside the scheduler's
+     * frame chain.
+     */
+    presentOverlay(): void {
+        this._overlayPresenter?.();
     }
 
     setTheme(vars: Record<string, string>): void {
@@ -417,6 +442,8 @@ export abstract class AbstractChart implements ChartImplementation {
     setColumnsConfig(cfg: Record<string, any>): void {
         this._columnsConfig = cfg ?? {};
         this._rebuildColumnFormatters();
+
+        this._theme = null;
     }
 
     /**
@@ -458,7 +485,11 @@ export abstract class AbstractChart implements ChartImplementation {
                 return undefined;
             }
 
-            const intl = createNumberFormatter(type, numberFormat);
+            const intl = createNumberFormatter(
+                type,
+                numberFormat,
+                CHART_NUMBER_DEFAULTS,
+            );
             return (v) => intl.format(v);
         }
 
@@ -468,7 +499,10 @@ export abstract class AbstractChart implements ChartImplementation {
                 return undefined;
             }
 
-            const intl = createDatetimeFormatter(dateFormat);
+            const intl = createDatetimeFormatter(
+                dateFormat,
+                CHART_DATETIME_DEFAULTS,
+            );
             return (v) => intl.format(v);
         }
 
@@ -478,7 +512,7 @@ export abstract class AbstractChart implements ChartImplementation {
                 return undefined;
             }
 
-            const intl = createDateFormatter(dateFormat);
+            const intl = createDateFormatter(dateFormat, CHART_DATE_DEFAULTS);
             return (v) => intl.format(v);
         }
 
@@ -571,6 +605,11 @@ export abstract class AbstractChart implements ChartImplementation {
      * inputs in `uploadAndRender`; they take effect on next data load.
      */
     setPluginConfig(cfg: PluginConfig): void {
+        // Persistence echo vs. real change: a restore whose legend
+        // fields equal the current values (the round-trip of a
+        // completed drag) must not disturb legend scroll or an
+        // in-flight gesture; different values win and cancel any drag.
+        this._legend.reconcileConfig(this._pluginConfig, cfg);
         this._pluginConfig = { ...cfg };
         this._facetConfig = {
             ...this._facetConfig,
@@ -582,16 +621,28 @@ export abstract class AbstractChart implements ChartImplementation {
             cfg.series_zoom_mode === "dynamic";
     }
 
+    protected colorScaleColumn(): string | null {
+        return null;
+    }
+
     /**
-     * Lazily decode the host-supplied theme vars. Subsequent calls hit
-     * the cache until `invalidateTheme()` clears it. Render-path
-     * callers should always read theme values through this method so
-     * the parsed `Theme` (gradient stops, palette, etc.) amortizes
-     * across an entire frame.
+     * Lazily decode the host-supplied theme vars, then patch in any
+     * per-column color-scale override for `colorScaleColumn()`.
+     * Subsequent calls hit the cache until `invalidateTheme()` /
+     * `setColumnsConfig` clears it or the color column changes.
+     * Render-path callers should always read theme values through this
+     * method so the parsed `Theme` (gradient stops, palette, etc.)
+     * amortizes across an entire frame.
      */
     _resolveTheme(): Theme {
-        if (!this._theme) {
-            this._theme = resolveThemeFromVars(this._themeVars);
+        const colorColumn = this.colorScaleColumn();
+        if (!this._theme || this._themeColorColumn !== colorColumn) {
+            this._themeColorColumn = colorColumn;
+            this._theme = applyColumnColorOverrides(
+                resolveThemeFromVars(this._themeVars),
+                this._columnsConfig,
+                colorColumn,
+            );
         }
 
         return this._theme;
@@ -628,6 +679,20 @@ export abstract class AbstractChart implements ChartImplementation {
         if (wasPinned) {
             this.emitUnselect();
         }
+    }
+
+    /**
+     * Silently dismiss any pinned tooltip (the chart's selection visual)
+     * WITHOUT emitting `perspective-global-filter` — unlike the `setView`
+     * implicit dismiss above, the HOST initiated this (its global filter
+     * bar removed the clause this selection contributed), so an unselect
+     * emit would double-mutate the host's filter set.
+     * `TooltipController.dismiss()` posts the host-side pin teardown but
+     * never fires `onUnpin` (that emit belongs to `dispatchClick`'s
+     * click-to-unpin gesture), so this is emit-free by construction.
+     */
+    deselect(): void {
+        this._tooltip.dismiss();
     }
 
     /**
@@ -810,17 +875,66 @@ export abstract class AbstractChart implements ChartImplementation {
      * scheduler so concurrent calls collapse to one `_fullRender` per
      * RAF and the host blitter receives one bitmap per frame. The
      * returned promise resolves after this chart's `awaitGpuFence` +
-     * `endFrame` chain — independent of other charts in the same
-     * RAF, which run their fence waits in parallel.
+     * `render2D` + `endFrame` chain — independent of other charts in the
+     * same RAF, which run their fence waits in parallel.
+     *
+     * `_fullRender` submits the GL commands and stashes the frame's 2D
+     * draws (gridlines + chrome) via {@link _defer2D}; the scheduler
+     * flushes them with {@link _flush2D} *after* the GPU fence, so the
+     * 2D canvases don't present ahead of the GL frame. The GL pass
+     * resets `_deferred2D` first so a mid-pass throw can't leak stale
+     * closures into the next frame.
      *
      * Every render-triggering caller — upload chunks, zoom / pan,
      * resize, theme invalidation, host-driven redraws — calls this.
-     * The only sanctioned bypass is `snapshotPng`, which calls
-     * `_fullRender` directly to keep the GL backbuffer intact for
+     * The only sanctioned bypass is `snapshotPng`, which uses
+     * {@link renderFrameSync} to keep the GL backbuffer intact for
      * `gl.readPixels`.
      */
     requestRender(glManager: WebGLContextManager): Promise<void> {
-        return scheduleRender(glManager, () => this._fullRender(glManager));
+        return scheduleRender(
+            glManager,
+            () => {
+                this._deferred2D = [];
+                this._fullRender(glManager);
+            },
+            () => this._flush2D(),
+        );
+    }
+
+    /**
+     * Queue a 2D-canvas draw (gridline or chrome) to run after the
+     * GPU fence. Called from the chart renderers in place of drawing to
+     * the gridline/chrome canvases inline during the GL pass. See
+     * {@link _deferred2D}.
+     */
+    _defer2D(fn: () => void): void {
+        this._deferred2D.push(fn);
+    }
+
+    /**
+     * Run and clear the queued 2D-canvas draws. Invoked by the scheduler
+     * after `awaitGpuFence` (Phase 2), and by {@link renderFrameSync}.
+     */
+    _flush2D(): void {
+        const draws = this._deferred2D;
+        this._deferred2D = [];
+        for (const draw of draws) {
+            draw();
+        }
+    }
+
+    /**
+     * Synchronous full frame (GL + 2D) for the `snapshotPng` bypass,
+     * which sits outside the scheduler and needs the gridline/chrome
+     * canvases painted before it composites them. Resets the deferred
+     * queue, runs the GL pass, then flushes the 2D draws immediately
+     * (no fence split — a snapshot isn't presented to the compositor).
+     */
+    renderFrameSync(glManager: WebGLContextManager): void {
+        this._deferred2D = [];
+        this._fullRender(glManager);
+        this._flush2D();
     }
 
     //  Lifecycle

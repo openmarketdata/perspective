@@ -14,7 +14,7 @@ import { RegularTableElement } from "regular-table";
 import { PRIVATE_PLUGIN_SYMBOL } from "../model/index.js";
 import type {
     DatagridModel,
-    ColumnsConfig,
+    ResolvedColumnsConfig,
     DatagridPluginElement,
     SelectedPositionMap,
 } from "../types.js";
@@ -42,7 +42,7 @@ export function createConsolidatedStyleListener(
     selectedPositionMap: SelectedPositionMap,
 ): () => void {
     return function consolidatedStyleListener(): void {
-        const plugins: ColumnsConfig =
+        const plugins: ResolvedColumnsConfig =
             (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {};
         const isSettingsOpen = viewer.hasAttribute("settings");
         const isSelectable = model._edit_mode === "SELECT_ROW_TREE";
@@ -53,9 +53,11 @@ export function createConsolidatedStyleListener(
         datagrid.classList.toggle("edit-mode-allowed", isEditableAllowed);
         const bodyCells: CollectedCell[] = [];
         const groupHeaderRows: CollectedHeaderRow[] = [];
+        const zebra_rows = datagrid._zebra_rows;
         const tbody = regularTable.children[0]?.children[1];
         if (tbody) {
             for (const tr of tbody.children) {
+                let row_y: number | undefined;
                 for (const cell of tr.children) {
                     const metadata = regularTable.getMeta(
                         cell as HTMLElement,
@@ -66,6 +68,7 @@ export function createConsolidatedStyleListener(
                         (metadata.type === "body" ||
                             metadata.type === "row_header")
                     ) {
+                        row_y ??= metadata.y;
                         const isHeader = cell.tagName === "TH";
                         bodyCells.push({
                             element: cell as HTMLElement,
@@ -74,6 +77,13 @@ export function createConsolidatedStyleListener(
                         });
                     }
                 }
+
+                tr.classList.toggle(
+                    "psp-zebra",
+                    zebra_rows >= 1 &&
+                        row_y !== undefined &&
+                        Math.floor(row_y / zebra_rows) % 2 === 1,
+                );
             }
         }
 

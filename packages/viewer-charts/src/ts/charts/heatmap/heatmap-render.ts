@@ -47,7 +47,17 @@ const HEATMAP_Y_AXIS_OPTS: CategoricalYAxisOptions = {
     skipLeafLevel: true,
 };
 
-import { renderLegend, renderLegendAt } from "../../axis/legend";
+import {
+    gradientLegendAutoFit,
+    renderLegend,
+    renderLegendAt,
+    type LegendPaintView,
+} from "../../axis/legend";
+import {
+    legendRightGutter,
+    resolveLegendMode,
+    legendSidebarWidth,
+} from "../../interaction/legend-controller";
 import heatmapVert from "../../shaders/heatmap.vert.glsl";
 import heatmapFrag from "../../shaders/heatmap.frag.glsl";
 import { colorValueToT } from "../../theme/gradient";
@@ -110,6 +120,7 @@ export function renderHeatmapFrame(
     // Measure both hierarchical axes *before* building the layout so the
     // plot rect accounts for their footprints. Numeric axes get fixed
     // gutters matching bar's branch (24px bottom, 55px left).
+    const rightExtra = legendRightGutter(chart._pluginConfig, true, 80, 0);
     const estLeft = yNumeric
         ? 55
         : measureCategoricalAxisWidth(yDomain, HEATMAP_Y_AXIS_OPTS);
@@ -117,7 +128,7 @@ export function renderHeatmapFrame(
         ? 24
         : measureCategoricalAxisHeight(
               xDomain,
-              Math.max(1, cssWidth - estLeft - 110),
+              Math.max(1, cssWidth - estLeft - 30 - rightExtra),
           );
 
     const layout = new PlotLayout(cssWidth, cssHeight, {
@@ -126,6 +137,7 @@ export function renderHeatmapFrame(
         hasLegend: true,
         bottomExtra,
         leftExtra: estLeft,
+        rightExtra,
     });
     chart._lastLayout = layout;
     if (chart._zoomController) {
@@ -225,7 +237,9 @@ export function renderHeatmapFrame(
         drawCellsInstanced(chart, gl, glManager, 0, chart._uploadedCells);
     });
 
-    renderHeatmapChromeOverlay(chart);
+    // Deferred past the GPU fence (see `_defer2D`) so the chrome canvas
+    // doesn't present ahead of the GL cells on resize.
+    chart._defer2D(() => renderHeatmapChromeOverlay(chart));
 }
 
 function ensureProgram(
@@ -390,6 +404,11 @@ function drawCellsInstanced(
  * Chrome overlay: X axis + Y axis + color legend + (optional) tooltip.
  */
 export function renderHeatmapChromeOverlay(chart: HeatmapChart): void {
+    paintHeatmapChromeOverlay(chart);
+    chart.presentOverlay();
+}
+
+function paintHeatmapChromeOverlay(chart: HeatmapChart): void {
     if (!chart._chromeCanvas) {
         return;
     }
@@ -475,20 +494,58 @@ export function renderHeatmapChromeOverlay(chart: HeatmapChart): void {
         );
     }
 
-    // Color legend on the right. The aggregate column name is in
-    // `_columnSlots[0]` (heatmap's only data column slot is "Color").
-    renderLegend(
-        chart._chromeCanvas,
-        layout,
-        {
+    const legendMode = resolveLegendMode(chart._pluginConfig, 0);
+    if (legendMode === "none") {
+        chart._legend.clearPainted();
+    } else {
+        const colorDomain = {
             min: chart._colorMin,
             max: chart._colorMax,
             label: chart._aggName,
-        },
-        theme.gradientStops,
-        theme,
-        chart.getColumnFormatter(chart._columnSlots[0], "value"),
-    );
+        };
+        const formatter = chart.getColumnFormatter(
+            chart._columnSlots[0],
+            "value",
+        );
+        const view: LegendPaintView = {
+            mode: legendMode === "floating" ? "floating" : "sidebar",
+            legend: chart._legend,
+            title: chart._aggName,
+            opacity: chart._pluginConfig.legend_opacity,
+        };
+        if (legendMode === "floating") {
+            renderLegendAt(
+                chart._chromeCanvas,
+                chart._legend.floatingBox(
+                    chart._pluginConfig,
+                    layout.cssWidth,
+                    layout.cssHeight,
+                    gradientLegendAutoFit(
+                        chart._chromeCanvas,
+                        theme,
+                        colorDomain,
+                        formatter,
+                        chart._aggName,
+                    ),
+                ),
+                colorDomain,
+                theme.gradientStops,
+                theme,
+                formatter,
+                view,
+            );
+        } else {
+            renderLegend(
+                chart._chromeCanvas,
+                layout,
+                colorDomain,
+                theme.gradientStops,
+                theme,
+                formatter,
+                view,
+            );
+        }
+    }
 
     if (chart._hoveredCell) {
         renderHeatmapTooltip(chart);
@@ -521,7 +578,8 @@ function renderFacetedHeatmap(
             cssHeight,
             xAxis: effectiveSharedX ? "outer" : "cell",
             yAxis: effectiveSharedY ? "outer" : "cell",
-            hasLegend: true,
+            hasLegend: resolveLegendMode(chart._pluginConfig, 0) === "sidebar",
+            legendWidth: legendSidebarWidth(chart._pluginConfig, 96),
             hasXLabel: chart._groupBy.length > 0,
             hasYLabel: false,
             gap: 8,
@@ -650,7 +708,9 @@ function renderFacetedHeatmap(
         });
     }
 
-    renderHeatmapChromeOverlay(chart);
+    // Deferred past the GPU fence (see `_defer2D`) so the chrome canvas
+    // doesn't present ahead of the GL cells on resize.
+    chart._defer2D(() => renderHeatmapChromeOverlay(chart));
 }
 
 /**
@@ -784,18 +844,34 @@ function renderFacetedHeatmapChromeOverlay(chart: HeatmapChart): void {
         );
     }
 
-    // Shared colorbar at `grid.legendRect`. No meaningful single label —
-    // the facet titles already name each column, and a combined label
-    // would be ambiguous when columns differ.
-    if (grid.legendRect) {
+    const legendMode = resolveLegendMode(chart._pluginConfig, 0);
+    const floating = legendMode === "floating";
+    const facetLayout = chart._facets[0].layout;
+    const legendAnchor = floating
+        ? chart._legend.floatingBox(
+              chart._pluginConfig,
+              facetLayout.cssWidth,
+              facetLayout.cssHeight,
+              gradientLegendAutoFit(
+                  chart._chromeCanvas,
+                  theme,
+                  { min: chart._colorMin, max: chart._colorMax },
+                  chart.getColumnFormatter(chart._columnSlots[0], "value"),
+                  chart._aggName,
+              ),
+          )
+        : grid.legendRect;
+    if (legendMode !== "none" && legendAnchor) {
         renderLegendAt(
             chart._chromeCanvas,
-            {
-                x: grid.legendRect.x,
-                y: grid.legendRect.y + 20,
-                width: grid.legendRect.width,
-                height: Math.max(1, grid.legendRect.height - 20),
-            },
+            floating
+                ? legendAnchor
+                : {
+                      x: legendAnchor.x,
+                      y: legendAnchor.y + 20,
+                      width: legendAnchor.width,
+                      height: Math.max(1, legendAnchor.height - 20),
+                  },
             {
                 min: chart._colorMin,
                 max: chart._colorMax,
@@ -804,7 +880,16 @@ function renderFacetedHeatmapChromeOverlay(chart: HeatmapChart): void {
             theme.gradientStops,
             theme,
             chart.getColumnFormatter(chart._columnSlots[0], "value"),
+            {
+                mode: floating ? "floating" : "sidebar",
+                legend: chart._legend,
+                title: chart._aggName,
+                sidebarGutter: floating ? undefined : grid.legendRect?.width,
+                opacity: chart._pluginConfig.legend_opacity,
+            },
         );
+    } else {
+        chart._legend.clearPainted();
     }
 
     if (chart._hoveredCell) {

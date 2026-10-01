@@ -1,3 +1,122 @@
+# [v5.5.1](https://github.com/perspective-dev/perspective/releases/tag/v5.5.1)
+
+_18 September 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.5.0...v5.5.1))
+
+Features
+
+- Add `zstd` support to `View::to_arrow` [#3232](https://github.com/finos/perspective/pull/3232)
+
+Fixes
+
+- Fix `null` groups and column group formatting in `viewer-datagrid` [#3234](https://github.com/finos/perspective/pull/3234)
+
+# [v5.5.0](https://github.com/perspective-dev/perspective/releases/tag/v5.5.0)
+
+_15 September 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.4.0...v5.5.0))
+
+**Breaking**
+
+- New `viewer-datagrid` options [#3229](https://github.com/finos/perspective/pull/3229)
+
+Features
+
+- `getView({mode})` API and `columns_config` cleanup [#3231](https://github.com/finos/perspective/pull/3231)
+
+# [v5.4.0](https://github.com/perspective-dev/perspective/releases/tag/v5.4.0)
+
+_9 September 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.3.1...v5.4.0))
+
+Features
+
+- Workspace menu [#3228](https://github.com/finos/perspective/pull/3228)
+
+Fixes
+
+- Add `View::on_remove`, better ExprTK coercion [#3227](https://github.com/finos/perspective/pull/3227)
+
+# [v5.3.1](https://github.com/perspective-dev/perspective/releases/tag/v5.3.1)
+
+_4 September 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.3.0...v5.3.1))
+
+Features
+
+- Better tooltips and configuration groups [#3226](https://github.com/finos/perspective/pull/3226)
+- Auto legend [#3225](https://github.com/finos/perspective/pull/3225)
+- Configurable legends for `viewer-charts` [#3221](https://github.com/finos/perspective/pull/3221)
+- PostgreSQL Virtual Server [#3219](https://github.com/finos/perspective/pull/3219)
+
+# [v5.3.0](https://github.com/perspective-dev/perspective/releases/tag/v5.3.0)
+
+_25 August 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.2.0...v5.3.0))
+
+Features
+
+- Palette & gradient style controls + new docs site [#3217](https://github.com/finos/perspective/pull/3217)
+
+Misc
+
+- Fix jupyter windows build [#3218](https://github.com/finos/perspective/pull/3218)
+- fix(datagrid): persist column widths in columns config [#3215](https://github.com/finos/perspective/pull/3215)
+
+# [v5.2.0](https://github.com/perspective-dev/perspective/releases/tag/v5.2.0)
+
+_10 August 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.1.0...v5.2.0))
+
+Features
+
+- Add `split_rollup_mode` [#3211](https://github.com/finos/perspective/pull/3211)
+- Add `STRUCT` and `LIST` support for Arrow/JSON, fix DuckDB Arrow coercion [#3210](https://github.com/finos/perspective/pull/3210)
+- LLM Agent for `&lt;perspective-viewer&gt;` [#3209](https://github.com/finos/perspective/pull/3209)
+- Add `not contains`, `matches` & `not matches` to `perspective-server` and Virtual Servers [#3208](https://github.com/finos/perspective/pull/3208)
+
+# [v5.1.0](https://github.com/perspective-dev/perspective/releases/tag/v5.1.0)
+
+_4 August 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v5.0.0...v5.1.0))
+
+Features
+
+- Window columns [#3207](https://github.com/finos/perspective/pull/3207)
+
+# [v5.0.0](https://github.com/perspective-dev/perspective/releases/tag/v5.0.0)
+
+_27 July 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v4.5.2...v5.0.0))
+
+**Breaking**
+
+- Deprecate `@perspective-dev/workspace` [#3199](https://github.com/finos/perspective/pull/3199)
+
+Features
+
+- Add `wasm64` builds to CI and publish [#3203](https://github.com/finos/perspective/pull/3203)
+- `&lt;perspective-viewer&gt;` API cleanup [#3201](https://github.com/finos/perspective/pull/3201)
+- Fix GenericSQLAdapter to use manual path concatenation [#3202](https://github.com/finos/perspective/pull/3202)
+- Add `@perspective-dev/anywidget` for vscode/jupyter [#3192](https://github.com/finos/perspective/pull/3192)
+
+Fixes
+
+- Fix redraw artifacts [#3204](https://github.com/finos/perspective/pull/3204)
+- Fix NaN bug in DuckDB aggregate SQL model, better wasm SIMD support, fix Window build [#3200](https://github.com/finos/perspective/pull/3200)
+- Fix `date` type timezone error [#3197](https://github.com/finos/perspective/pull/3197)
+- Fix `to_columns` off-by-one serialization error [#3196](https://github.com/finos/perspective/pull/3196)
+
+Misc
+
+- Fix `mallinfo` use [#3183](https://github.com/finos/perspective/pull/3183)
+
+# [v4.5.2](https://github.com/perspective-dev/perspective/releases/tag/v4.5.2)
+
+_9 July 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v4.5.1...v4.5.2))
+
+Features
+
+- PEP 783 (pypi emscripten wheels) [#3191](https://github.com/finos/perspective/pull/3191)
+- Add `page_to_disk` option, disk-backed columns via OPFS, `mmap` or `node:fs`. [#3185](https://github.com/finos/perspective/pull/3185)
+
+Fixes
+
+- Fix `viewer-charts` context sharing and misc bugs [#3190](https://github.com/finos/perspective/pull/3190)
+- Fix memory safety issues [#3188](https://github.com/finos/perspective/pull/3188)
+
 # [v4.5.1](https://github.com/perspective-dev/perspective/releases/tag/v4.5.1)
 
 _30 May 2026_ ([Full changelog](https://github.com/finos/perspective/compare/v4.5.0...v4.5.1))

@@ -50,10 +50,19 @@ export interface TypedArrayWindowOptions {
  * `Promise`, the underlying `with_typed_arrays` call awaits it before
  * releasing the backing Arrow buffer. Callers must not retain any
  * `ColumnData` reference past `render`'s resolution.
+ *
+ * `render` also receives the DELIVERED row count — the shortest
+ * column's length, which may be less than the requested `end_row`:
+ * the engine clamps the window to the view's size at fetch time, and
+ * on a fast-updating table with deletions that size can shrink after
+ * the caller's `num_rows()` round-trip. Build pipelines must iterate
+ * to THIS count, never the requested one — a typed array indexed past
+ * its length returns `undefined`, which no amount of validity-bitmap
+ * checking catches (the bitmap read is out-of-bounds too).
  */
 export async function viewToColumnDataMap(
     view: View,
-    render: (data: ColumnDataMap) => void | Promise<void>,
+    render: (data: ColumnDataMap, numRows: number) => void | Promise<void>,
     options?: TypedArrayWindowOptions,
 ): Promise<void> {
     const result: ColumnDataMap = new Map();
@@ -86,12 +95,9 @@ export async function viewToColumnDataMap(
                 } else if (vals instanceof Float64Array) {
                     // Datetime/Date columns are emitted as Float64 to keep
                     // millisecond precision; numeric Float64 also lands here
-                    // when `float32` mode is off. Keep them as f64 — the
-                    // chart's CPU mirrors and extents will rebase to f32 at
-                    // upload time.
+                    // when `float32` mode is off.
                     result.set(name, { type: "float64", values: vals, valid });
                 } else {
-                    // Fallback: treat as float32
                     // TODO: Instance check if this needs a copy?
                     result.set(name, {
                         type: "float32",
@@ -101,7 +107,18 @@ export async function viewToColumnDataMap(
                 }
             }
 
-            await render(result);
+            let numRows = 0;
+            if (result.size > 0) {
+                numRows = Infinity;
+                for (const col of result.values()) {
+                    const n = col.indices?.length ?? col.values?.length ?? 0;
+                    if (n < numRows) {
+                        numRows = n;
+                    }
+                }
+            }
+
+            await render(result, numRows);
         },
     );
 }

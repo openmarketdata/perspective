@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 use js_sys::{Array, Date, Object, Reflect, Uint8Array};
 use perspective_client::proto::{ColumnType, HostedTable};
-use perspective_client::virtual_server;
 use perspective_client::virtual_server::{Features, ResultExt, VirtualServerHandler};
+use perspective_client::{DescribeError, DescribeVerdict, Description, virtual_server};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -72,6 +72,124 @@ fn jsvalue_to_scalar(val: &JsValue) -> perspective_client::config::Scalar {
     } else {
         perspective_client::config::Scalar::Null
     }
+}
+
+// This interface is the TypeScript contract for [`JsServerHandler`] below.
+// There is no codegen tying the two together - every method dispatched via
+// `Reflect::get` in this file MUST be declared here, with the exact argument
+// and return types the `Reflect` call sites accept. Keep them in sync when
+// editing either.
+#[wasm_bindgen(typescript_custom_section)]
+const TS_VIRTUAL_SERVER_HANDLER: &'static str = r#"
+/**
+ * A table hosted by a `VirtualServerHandler`, as returned by
+ * `getHostedTables()`. A plain `string` is shorthand for `{ name }`.
+ */
+export interface VirtualHostedTable {
+    name: string;
+    index?: string;
+    limit?: number;
+}
+
+/** One expression's compile error, as reported by `tableDescribe`. */
+export interface ExpressionError {
+    error_message: string;
+    line: number;
+    column: number;
+}
+
+/** The verdict of `VirtualServerHandler.tableDescribe`. */
+export type TableDescription =
+    | {
+          expression_schema: Record<string, ColumnType>;
+          view_schema: Record<string, ColumnType>;
+      }
+    | {
+          expression_schema?: Record<string, ColumnType>;
+          expression_errors: Record<string, ExpressionError>;
+      }
+    | { config_error: string };
+
+/**
+ * Handler interface that you implement to provide custom data sources.
+ *
+ * All methods will be called by the `VirtualServer` when handling protocol
+ * messages from Perspective clients. Methods can return values directly or
+ * return Promises for asynchronous operations (e.g., database queries).
+ * Optional methods fall back to defaults documented per-method.
+ */
+export interface VirtualServerHandler {
+    getHostedTables():
+        | (string | VirtualHostedTable)[]
+        | Promise<(string | VirtualHostedTable)[]>;
+    tableSchema(
+        tableId: string,
+    ): Record<string, ColumnType> | Promise<Record<string, ColumnType>>;
+    tableSize(tableId: string): number | Promise<number>;
+    tableMakeView(
+        tableId: string,
+        viewId: string,
+        config: ViewConfigUpdate,
+    ): void | Promise<void>;
+    viewDelete(viewId: string): void | Promise<void>;
+    viewGetData(
+        viewId: string,
+        config: ViewConfig,
+        schema: Record<string, ColumnType>,
+        viewport: ViewWindow,
+        dataSlice: VirtualDataSlice,
+    ): void | Promise<void>;
+
+    /** Defaults to `tableSchema(viewId)`. */
+    viewSchema?(
+        viewId: string,
+        config: ViewConfig,
+    ): Record<string, ColumnType> | Promise<Record<string, ColumnType>>;
+
+    /** Defaults to `tableSize(viewId)`. */
+    viewSize?(viewId: string): number | Promise<number>;
+
+    /** Defaults to the length of `tableSchema(tableId)`. */
+    tableColumnsSize?(tableId: string): number | Promise<number>;
+
+    /** Defaults to the length of `viewSchema(viewId, config)`. */
+    viewColumnSize?(
+        viewId: string,
+        config: ViewConfig,
+    ): number | Promise<number>;
+
+    /**
+     * Validate a complete view config against a table and report the schema
+     * a view built from it would have, without creating one.
+     */
+    tableDescribe(
+        tableId: string,
+        config: ViewConfig,
+    ): TableDescription | Promise<TableDescription>;
+
+    viewGetMinMax?(
+        viewId: string,
+        columnName: string,
+        config: ViewConfig,
+    ): { min: Scalar; max: Scalar } | Promise<{ min: Scalar; max: Scalar }>;
+
+    /** Defaults to no optional features. */
+    getFeatures?(): Features | Promise<Features>;
+
+    /** Defaults to port `0`. */
+    tableMakePort?(): number | Promise<number>;
+
+    makeTable?(
+        tableId: string,
+        data: string | Uint8Array,
+    ): void | Promise<void>;
+}
+"#;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(typescript_type = "VirtualServerHandler")]
+    pub type JsVirtualServerHandler;
 }
 
 pub struct JsServerHandler(Object);
@@ -227,39 +345,39 @@ impl VirtualServerHandler for JsServerHandler {
         })
     }
 
-    fn table_validate_expression(
-        &self,
+    fn table_describe(
+        &mut self,
         table_id: &str,
-        expression: &str,
-    ) -> HandlerFuture<Result<ColumnType, Self::Error>> {
-        // TODO Cache these inspection calls
-        let has_method = Reflect::get(&self.0, &JsValue::from_str("tableValidateExpression"))
+        config: &perspective_client::config::ViewConfig,
+    ) -> HandlerFuture<Result<Result<Description, DescribeError>, Self::Error>> {
+        let has_method = Reflect::get(&self.0, &JsValue::from_str("tableDescribe"))
             .map(|val| !val.is_undefined())
             .unwrap_or(false);
 
         let handler = self.0.clone();
         let table_id = table_id.to_string();
-        let expression = expression.to_string();
+        let config_value = JsValue::from_serde_ext(config);
         Box::pin(async move {
             if !has_method {
                 return Err(JsError(JsValue::from_str(
-                    "feature `table_validate_expression` not implemented",
+                    "`tableDescribe` is required of a `VirtualServerHandler`",
                 )));
             }
 
             let this = JsServerHandler(handler);
             let args = Array::new();
             args.push(&JsValue::from_str(&table_id));
-            args.push(&JsValue::from_str(&expression));
-            let result = this
-                .call_method_js_async("tableValidateExpression", &args)
-                .await?;
+            args.push(&config_value?);
+            let result = this.call_method_js_async("tableDescribe", &args).await?;
+            let verdict: DescribeVerdict = result.into_serde_ext().map_err(|e| {
+                JsError(JsValue::from_str(&format!(
+                    "`tableDescribe` must return a `TableDescription`: {}",
+                    e
+                )))
+            })?;
 
-            let type_str = result
-                .as_string()
-                .ok_or_else(|| JsError(JsValue::from_str("Must return a string")))?;
-
-            Ok(ColumnType::from_str(&type_str).unwrap())
+            Result::<Description, DescribeError>::try_from(verdict)
+                .map_err(|e| JsError(JsValue::from_str(&e.to_string())))
         })
     }
 
@@ -785,9 +903,9 @@ pub struct VirtualServer(Rc<UnsafeCell<virtual_server::VirtualServer<JsServerHan
 #[wasm_bindgen]
 impl VirtualServer {
     #[wasm_bindgen(constructor)]
-    pub fn new(handler: Object) -> Result<VirtualServer, JsValue> {
+    pub fn new(handler: JsVirtualServerHandler) -> Result<VirtualServer, JsValue> {
         Ok(VirtualServer(Rc::new(UnsafeCell::new(
-            virtual_server::VirtualServer::new(JsServerHandler(handler)),
+            virtual_server::VirtualServer::new(JsServerHandler(handler.unchecked_into())),
         ))))
     }
 

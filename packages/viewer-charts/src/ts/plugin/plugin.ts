@@ -10,13 +10,19 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
+import { colorsToCss, stopsToCss } from "../theme/gradient";
 import type { View } from "@perspective-dev/client";
 import type {
     HTMLPerspectiveViewerElement,
     IPerspectiveViewerPlugin,
     PluginStaticConfig,
 } from "@perspective-dev/viewer";
-import { ChartTypeConfig, PluginConfigField } from "./charts";
+import {
+    ChartTypeConfig,
+    LEGEND_FIELDS,
+    TOOLTIP_FIELDS,
+    PluginConfigField,
+} from "./charts";
 import style from "../../css/perspective-viewer-charts.css";
 import {
     DEFAULT_FACET_CONFIG,
@@ -24,9 +30,19 @@ import {
     type FacetConfig,
     type PluginConfig,
 } from "../charts/chart";
+import {
+    CHART_DATE_DEFAULTS,
+    CHART_DATETIME_DEFAULTS,
+    CHART_NUMBER_DEFAULTS,
+} from "./format-defaults";
 import { RawEventForwarder } from "../interaction/raw-event-forwarder";
 import { RendererTransport } from "../transport/renderer-transport";
+import { TILE_SOURCES, type TileSourceSpec } from "../map/tile-source";
 import { RENDER_BLIT_MODE } from "../config";
+import { snapshotThemeVars } from "../theme/theme-snapshot";
+import { resolveThemeFromVars, type Theme } from "../theme/theme";
+import { resolvePalette } from "../theme/palette";
+import { vec3ToHexColor } from "../utils/css";
 
 /**
  * Facet-rendering defaults shared by every chart. Per-chart overrides
@@ -36,6 +52,26 @@ import { RENDER_BLIT_MODE } from "../config";
  * — flip the defaults in `DEFAULT_FACET_CONFIG` to change globally.
  */
 const FACET_CONFIG_DEFAULTS: FacetConfig = { ...DEFAULT_FACET_CONFIG };
+
+/**
+ * Register a raster XYZ tile provider at runtime. The provider joins
+ * the bundled [map/tile-sources.json] entries in the settings panel's
+ * `map_tile_provider` enum and resolves on any map chart from its next
+ * config forward onward — the resolved spec rides every outgoing
+ * `setPluginConfig` / `init` message alongside the config that names
+ * it, so no separate registry-sync operation exists. Re-registering an
+ * id replaces it (a changed template drops cached tiles via the
+ * content-derived cache identity); a chart currently displaying that
+ * id picks the replacement up on its next `restore()`. Throws
+ * `TypeError` on a malformed spec. Returns the normalized spec.
+ *
+ * A key-gated provider is registered with the key embedded in its
+ * `template` — keys never enter `plugin_config`, so they never appear
+ * in `save()` output.
+ */
+export function registerTileSource(spec: unknown): TileSourceSpec {
+    return TILE_SOURCES.register(spec);
+}
 
 /**
  * Static UI-control spec per `plugin_config` field. Mirrors the shape
@@ -50,80 +86,174 @@ type FieldSpec =
           kind: "Enum";
           variants: ReadonlyArray<{ value: string; label: string }>;
       }
-    | { kind: "Number"; min: number; max: number; step?: number };
+    | { kind: "Number"; min: number; max: number; step?: number }
+    | { kind: "Alignment"; corners?: boolean };
 
-const FIELD_SCHEMAS: Record<PluginConfigField, FieldSpec> = {
-    auto_alt_y_axis: { kind: "Bool" },
-    include_zero: { kind: "Bool" },
-    domain_mode: {
-        kind: "Enum",
-        variants: [
-            { value: "fit", label: "Fit" },
-            { value: "expand", label: "Expand" },
-        ],
-    },
-    facet_mode: {
-        kind: "Enum",
-        variants: [
-            { value: "grid", label: "Grid" },
-            { value: "overlay", label: "Overlay" },
-        ],
-    },
-    facet_zoom_mode: {
-        kind: "Enum",
-        variants: [
-            { value: "shared", label: "Shared" },
-            { value: "independent", label: "Independent" },
-        ],
-    },
-    series_zoom_mode: {
-        kind: "Enum",
-        variants: [
-            { value: "dynamic", label: "Dynamic" },
-            { value: "fixed", label: "Fixed" },
-        ],
-    },
-    line_width_px: { kind: "Number", min: 0.5, step: 0.5, max: 16 },
-    point_size_px: { kind: "Number", min: 1, max: 32 },
-    band_inner_frac: { kind: "Number", min: 0.1, max: 1, step: 0.01 },
-    bar_inner_pad: { kind: "Number", min: 0, max: 0.9, step: 0.01 },
-    wick_width_px: { kind: "Number", min: 0.5, step: 0.5, max: 8 },
-    ohlc_line_width_px: { kind: "Number", min: 0.5, step: 0.5, max: 8 },
-    gradient_radius_px: { kind: "Number", min: 2, step: 1, max: 256 },
-    gradient_intensity: { kind: "Number", min: 0.05, step: 0.05, max: 4 },
-    gradient_heat_max: { kind: "Number", min: 0.1, step: 0.1, max: 64 },
-    gradient_color_mode: {
-        kind: "Enum",
-        variants: [
-            { value: "mean", label: "Mean (density-weighted)" },
-            { value: "density", label: "Density only" },
-            { value: "extreme", label: "Extremes" },
-            { value: "signed", label: "Signed sum" },
-        ],
-    },
-    map_tile_provider: {
-        kind: "Enum",
-        variants: [
-            { value: "carto-positron", label: "Light (Positron)" },
-            { value: "carto-dark-matter", label: "Dark Matter" },
-            { value: "carto-voyager", label: "Voyager" },
-        ],
-    },
-    map_tile_alpha: { kind: "Number", min: 0, max: 1, step: 0.05 },
-};
+/**
+ * A `FieldSpec` entry may be a thunk when its contents depend on
+ * runtime state — `map_tile_provider`'s variants come from the tile-
+ * source registry, which grows via `registerTileSource`, so the enum
+ * must be resolved per `plugin_config_schema()` call rather than at
+ * module init.
+ */
+const FIELD_SCHEMAS: Record<PluginConfigField, FieldSpec | (() => FieldSpec)> =
+    {
+        auto_alt_y_axis: { kind: "Bool" },
+        include_zero: { kind: "Bool" },
+        domain_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "fit", label: "Fit" },
+                { value: "expand", label: "Expand" },
+            ],
+        },
+        facet_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "grid", label: "Grid" },
+                { value: "overlay", label: "Overlay" },
+            ],
+        },
+        facet_zoom_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "shared", label: "Shared" },
+                { value: "independent", label: "Independent" },
+            ],
+        },
+        series_zoom_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "dynamic", label: "Dynamic" },
+                { value: "fixed", label: "Fixed" },
+            ],
+        },
+        line_width_px: { kind: "Number", min: 0.5, step: 0.5, max: 16 },
+        point_size_px: { kind: "Number", min: 1, max: 32 },
+        band_inner_frac: { kind: "Number", min: 0.1, max: 1, step: 0.01 },
+        bar_inner_pad: { kind: "Number", min: 0, max: 0.9, step: 0.01 },
+        wick_width_px: { kind: "Number", min: 0.5, step: 0.5, max: 8 },
+        ohlc_line_width_px: { kind: "Number", min: 0.5, step: 0.5, max: 8 },
+        gradient_radius_px: { kind: "Number", min: 2, step: 1, max: 256 },
+        gradient_intensity: { kind: "Number", min: 0.05, step: 0.05, max: 4 },
+        gradient_heat_max: { kind: "Number", min: 0.1, step: 0.1, max: 64 },
+        gradient_color_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "mean", label: "Mean (density-weighted)" },
+                { value: "density", label: "Density only" },
+                { value: "extreme", label: "Extremes" },
+                { value: "signed", label: "Signed sum" },
+            ],
+        },
+        map_tile_provider: () => ({
+            kind: "Enum",
+            variants: TILE_SOURCES.list().map((s) => ({
+                value: s.id,
+                label: s.label,
+            })),
+        }),
+        map_tile_alpha: { kind: "Number", min: 0, max: 1, step: 0.05 },
+        numeric_axes: { kind: "Bool" },
+        legend_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "auto", label: "Auto" },
+                { value: "sidebar", label: "Sidebar" },
+                { value: "none", label: "None" },
+                { value: "floating", label: "Floating" },
+            ],
+        },
+        legend_size_mode: {
+            kind: "Enum",
+            variants: [
+                { value: "auto", label: "Auto" },
+                { value: "fixed", label: "Fixed" },
+            ],
+        },
+        // 0 = auto (the chart family's historical gutter width).
+        legend_width_px: { kind: "Number", min: 0, max: 512, step: 1 },
+        legend_height_px: { kind: "Number", min: 48, max: 1024, step: 1 },
+        legend_anchor: { kind: "Alignment", corners: true },
+        legend_x: { kind: "Number", min: 0, max: 1, step: 0.01 },
+        legend_y: { kind: "Number", min: 0, max: 1, step: 0.01 },
+        legend_opacity: { kind: "Number", min: 0, max: 1, step: 0.05 },
+        tooltip_max_column_px: { kind: "Number", min: 40, max: 512, step: 1 },
+        tooltip_opacity: { kind: "Number", min: 0, max: 1, step: 0.05 },
+    };
 
 function fieldSpec(
     key: PluginConfigField,
     defaults: PluginConfig,
 ): Record<string, unknown> & { kind: string } {
-    return { ...FIELD_SCHEMAS[key], key, default: defaults[key] };
+    const entry = FIELD_SCHEMAS[key];
+    const spec = typeof entry === "function" ? entry() : entry;
+    return { ...spec, key, default: defaults[key] };
 }
+
+const PLUGIN_FIELD_GROUPS: ReadonlyArray<{
+    key: string;
+    fields: readonly PluginConfigField[];
+}> = [
+    {
+        key: "axes",
+        fields: [
+            "auto_alt_y_axis",
+            "include_zero",
+            "domain_mode",
+            "numeric_axes",
+        ],
+    },
+    {
+        key: "facets",
+        fields: ["facet_mode", "facet_zoom_mode", "series_zoom_mode"],
+    },
+    {
+        key: "glyph",
+        fields: [
+            "line_width_px",
+            "point_size_px",
+            "band_inner_frac",
+            "bar_inner_pad",
+            "wick_width_px",
+            "ohlc_line_width_px",
+        ],
+    },
+    {
+        key: "density",
+        fields: [
+            "gradient_color_mode",
+            "gradient_radius_px",
+            "gradient_intensity",
+            "gradient_heat_max",
+        ],
+    },
+    { key: "basemap", fields: ["map_tile_provider", "map_tile_alpha"] },
+    { key: "legend", fields: LEGEND_FIELDS },
+    { key: "tooltip", fields: TOOLTIP_FIELDS },
+];
 
 const GLOBAL_STYLES = (() => {
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(style);
     return [sheet];
 })();
+
+/**
+ * Process-global GL presentation strategy, shared by *every* chart-type
+ * plugin in this renderer. Seeded from the build-time {@link RENDER_BLIT_MODE}
+ * and overridable at runtime via
+ * {@link HTMLPerspectiveViewerWebGLPluginElement.setBlitMode}.
+ *
+ * Module scope (not per-instance) on purpose: blit-vs-direct is a
+ * whole-renderer decision — in `"blit"` mode the worker shares a pool of
+ * GL contexts across all charts ([webgl/context-pool.ts]), so a page
+ * can't sensibly mix strategies per chart. Every per-chart-type subclass
+ * registered in [index.ts] reads this one value when it builds its
+ * renderer, so setting it once (before the first chart renders) applies
+ * to all of them.
+ */
+let BLIT_MODE: "direct" | "blit" = RENDER_BLIT_MODE;
 
 export class HTMLPerspectiveViewerWebGLPluginElement
     extends HTMLElement
@@ -138,8 +268,6 @@ export class HTMLPerspectiveViewerWebGLPluginElement
     private _renderer: RendererTransport | null = null;
     private _rendererPromise: Promise<RendererTransport> | null = null;
     private _rawEventForwarder: RawEventForwarder | null = null;
-    private _generation = 0;
-    private _renderBlitMode: "direct" | "blit" = RENDER_BLIT_MODE;
     private _resetClickAbort: AbortController | null = null;
 
     /**
@@ -156,6 +284,16 @@ export class HTMLPerspectiveViewerWebGLPluginElement
      * resolved values in the `InitMsg`.
      */
     private _pluginConfigStore: PluginConfig | null = null;
+
+    /**
+     * Per-column config (`alt_axis`, `chart_type`, formats, …), held on
+     * the element for the same reason as `_pluginConfigStore`: the host
+     * calls `restore()` BEFORE the first draw builds the renderer, so
+     * forwarding only to a live renderer silently drops the initial
+     * `columns_config` — `_buildRenderer` ships it in the `InitMsg`
+     * instead.
+     */
+    private _columnsConfig: Record<string, any> = {};
 
     private get _pluginConfig(): PluginConfig {
         if (!this._pluginConfigStore) {
@@ -257,13 +395,40 @@ export class HTMLPerspectiveViewerWebGLPluginElement
             return this._rendererPromise;
         }
 
-        this._rendererPromise = this._buildRenderer(view).then((r) => {
-            this._renderer = r;
-            this._setupInteraction(r);
-            return r;
-        });
+        // `_buildRenderer` is async — it awaits `getClient`, `getTable`,
+        // and a full worker handshake — so a `disconnectedCallback`
+        // (toggle / chart-type switch) frequently lands *before* this
+        // `.then` runs. At that point `this._renderer` is still null,
+        // so `delete()`'s `if (this._renderer)` teardown is skipped and
+        // the freshly-built transport (and its WebGL context) would be
+        // assigned to a detached element and leak — one context per
+        // raced toggle, until the browser evicts the oldest.
+        //
+        // `delete()` sets `_rendererPromise = null`, so promise identity
+        // is the dispose signal: if `this._rendererPromise` no longer
+        // points at *this* build when it resolves, the element was
+        // deleted (or a reconnect started a newer build) and we destroy
+        // the orphan instead of adopting it. Promise identity is the
+        // right token: a rapid draw→update must NOT tear down the
+        // single in-flight build it shares via this memoized promise.
+        const p: Promise<RendererTransport> = this._buildRenderer(view).then(
+            (r) => {
+                if (this._rendererPromise !== p) {
+                    r.destroy();
+                    throw new Error("renderer disposed during init");
+                }
 
-        return this._rendererPromise;
+                this._renderer = r;
+                this._setupInteraction(r);
+                return r;
+            },
+        );
+
+        // Swallow the dispose rejection so it doesn't surface as an
+        // unhandled rejection; `_drawImpl` catches it and bails.
+        p.catch(() => {});
+        this._rendererPromise = p;
+        return p;
     }
 
     /**
@@ -310,11 +475,16 @@ export class HTMLPerspectiveViewerWebGLPluginElement
 
     private async _buildRenderer(view: View): Promise<RendererTransport> {
         const viewer = this.parentElement as HTMLPerspectiveViewerElement;
-        const client = await viewer.getClient();
+        // This chart's own panel (its `slot`). Used to scope the client/table
+        // to THIS panel rather than the host's active/seed panel (the bare
+        // getClient()/getTable() resolve element-wide in a multi-panel viewer),
+        // and to tag the dispatched interaction events with their source panel.
+        const panel = this.getAttribute("slot") ?? undefined;
+        const client = await viewer.getClient({ panel });
         const viewer_class = customElements.get("perspective-viewer");
         const clientWasm = viewer_class.get_wasm_module();
         const clientWorkerURL = viewer_class.get_worker_url();
-        const table = await viewer?.getTable?.();
+        const table = await viewer?.getTable?.({ panel });
         const tableName: string | undefined = table
             ? await table.get_name()
             : undefined;
@@ -327,6 +497,7 @@ export class HTMLPerspectiveViewerWebGLPluginElement
             client,
             view,
             tableName,
+            panel,
             clientWorkerURL,
             clientWasm,
             chartTag: this._chartType.tag,
@@ -336,6 +507,19 @@ export class HTMLPerspectiveViewerWebGLPluginElement
                 if (zoomControls) {
                     zoomControls.classList.toggle("visible", !isDefault);
                 }
+            },
+            onPluginConfigDelta: (fields) => {
+                this._pluginConfig = { ...this._pluginConfig, ...fields };
+                const host = this
+                    .parentElement as HTMLPerspectiveViewerElement | null;
+                (
+                    host?.restore(
+                        { plugin_config: fields },
+                        panel ? { panel } : undefined,
+                    ) as Promise<void> | undefined
+                )?.catch((e: unknown) => {
+                    console.error("legend config persistence failed", e);
+                });
             },
         });
 
@@ -349,16 +533,38 @@ export class HTMLPerspectiveViewerWebGLPluginElement
                 zoom_mode: this._pluginConfig.facet_zoom_mode,
             },
             pluginConfig: this._pluginConfig,
+            columnsConfig: this._columnsConfig,
             defaultChartType: this._chartType.default_chart_type,
-            renderBlitMode: this._renderBlitMode,
+            renderBlitMode: BLIT_MODE,
         });
 
         return transport;
     }
 
-    setBlitMode(mode: "direct" | "blit") {
-        console.assert(this._initialized, "Already initialized");
-        this._renderBlitMode = mode;
+    /**
+     * Select the GL presentation strategy for *all* chart-type plugins
+     * in this renderer. Static + process-global: the value is shared by
+     * every per-chart-type subclass, so it must be set once before the
+     * charts that should use it build their renderers (a renderer reads
+     * {@link BLIT_MODE} at construction in `_buildRenderer`; charts
+     * already built keep their mode until torn down and rebuilt).
+     *
+     * - `"direct"` — each chart owns a GL context 1:1 with its visible
+     *   canvas (lowest latency; bounded by the browser's ~16-context
+     *   cap).
+     * - `"blit"` — charts render off-screen and share a pool of GL
+     *   contexts ([webgl/context-pool.ts]), so a page can exceed the cap.
+     */
+    static setBlitMode(mode: "direct" | "blit") {
+        BLIT_MODE = mode;
+    }
+
+    static registerTileSource(spec: unknown): TileSourceSpec {
+        return registerTileSource(spec);
+    }
+
+    static tileSources(): readonly TileSourceSpec[] {
+        return TILE_SOURCES.list();
     }
 
     get_static_config(): PluginStaticConfig {
@@ -371,26 +577,86 @@ export class HTMLPerspectiveViewerWebGLPluginElement
             max_cells: this._chartType.max_cells,
             max_columns: this._chartType.max_columns,
             group_rollup_modes: ["flat"],
+            split_rollup_modes: ["flat"],
+            group_by_role: this._chartType.group_by_role,
+            split_by_role: this._chartType.split_by_role,
+            connects_row_order: !!this._chartType.connects_row_order,
             priority: 0,
             can_render_column_styles:
                 !!this._chartType.default_chart_type ||
-                this._chartType.category === "Cartesian Charts",
+                this._chartType.category === "Cartesian Charts" ||
+                this._chartType.category === "Hierarchical Charts" ||
+                this._chartType.category === "Map Charts",
         };
     }
 
     column_config_schema(
         column_type: string,
-        _group: string | undefined,
-        _column_name: string,
+        group: string | undefined,
+        column_name: string,
         current_value: Record<string, unknown> | null,
-        _viewer_config?: { group_by?: string[]; group_rollup_mode?: string },
+        viewer_config?: {
+            columns?: (string | null)[];
+            group_by?: string[];
+            split_by?: string[];
+            group_rollup_mode?: string;
+        },
     ) {
         const fields: Array<Record<string, unknown> & { kind: string }> = [];
+
+        if (group === "Color") {
+            const numeric_gradient =
+                this._chartType.category === "Hierarchical Charts"
+                    ? column_type === "integer" ||
+                      column_type === "float" ||
+                      column_type === "date" ||
+                      column_type === "datetime"
+                    : column_type !== "string";
+            if (numeric_gradient) {
+                fields.push({
+                    kind: "GradientStops",
+                    key: "gradient",
+                    default: this._themeGradientStopsSpec(),
+                });
+            } else {
+                fields.push({
+                    kind: "Palette",
+                    key: "palette",
+                    default: this._themeSeriesPaletteHex(),
+                });
+            }
+        }
 
         // Y-series plugins expose the per-column chart_type picker; non-Y
         // plugins leave `default_chart_type` unset.
         const def = this._chartType.default_chart_type;
         if (def && (column_type === "integer" || column_type === "float")) {
+            const is_series_glyph =
+                def === "bar" ||
+                def === "line" ||
+                def === "scatter" ||
+                def === "area";
+
+            if (is_series_glyph) {
+                const has_split = (viewer_config?.split_by?.length ?? 0) > 0;
+                if (has_split) {
+                    fields.push({
+                        kind: "Palette",
+                        key: "palette",
+                        default: this._themeSeriesPaletteHex(),
+                    });
+                } else {
+                    const slot = (viewer_config?.columns ?? [])
+                        .filter((c): c is string => !!c)
+                        .indexOf(column_name);
+                    fields.push({
+                        kind: "Color",
+                        key: "color",
+                        default: this._themeSeriesColorHex(Math.max(0, slot)),
+                    });
+                }
+            }
+
             fields.push({
                 kind: "Enum",
                 key: "chart_type",
@@ -417,12 +683,6 @@ export class HTMLPerspectiveViewerWebGLPluginElement
                     default: supports_stack,
                 });
             }
-
-            const is_series_glyph =
-                def === "bar" ||
-                def === "line" ||
-                def === "scatter" ||
-                def === "area";
 
             if (is_series_glyph) {
                 fields.push({
@@ -462,9 +722,20 @@ export class HTMLPerspectiveViewerWebGLPluginElement
         // Per-column formatter widgets. Surfaced for every chart type so
         // axes / tooltips / legends honor the user's format choice.
         if (column_type === "integer" || column_type === "float") {
-            fields.push({ kind: "NumberFormat" });
-        } else if (column_type === "date" || column_type === "datetime") {
-            fields.push({ kind: "DatetimeFormat" });
+            fields.push({
+                kind: "NumberFormat",
+                default: CHART_NUMBER_DEFAULTS,
+            });
+        } else if (column_type === "datetime") {
+            fields.push({
+                kind: "DatetimeFormat",
+                default: CHART_DATETIME_DEFAULTS,
+            });
+        } else if (column_type === "date") {
+            fields.push({
+                kind: "DatetimeFormat",
+                default: CHART_DATE_DEFAULTS,
+            });
         }
 
         return { fields };
@@ -475,11 +746,62 @@ export class HTMLPerspectiveViewerWebGLPluginElement
         group_rollup_mode?: string;
     }) {
         const defaults = this._effectiveDefaults();
-        const fields = this._chartType.applicable_plugin_fields.map((key) =>
-            fieldSpec(key, defaults),
-        );
+        const applicable = this._chartType.applicable_plugin_fields;
+        const present = new Set(applicable);
 
-        return { fields };
+        const grouped = new Set<PluginConfigField>();
+        const groups: Array<Record<string, unknown> & { kind: string }> = [];
+        for (const group of PLUGIN_FIELD_GROUPS) {
+            const members = group.fields.filter((k) => present.has(k));
+            if (members.length >= 1) {
+                for (const k of members) {
+                    grouped.add(k);
+                }
+
+                groups.push({
+                    kind: "Group",
+                    key: group.key,
+                    fields: members.map((k) => fieldSpec(k, defaults)),
+                });
+            }
+        }
+
+        const fields: Array<Record<string, unknown> & { kind: string }> =
+            applicable
+                .filter((k) => !grouped.has(k))
+                .map((k) => fieldSpec(k, defaults));
+
+        return { fields: [...fields, ...groups] };
+    }
+
+    private _resolvedTheme(): Theme {
+        return resolveThemeFromVars(snapshotThemeVars(this));
+    }
+
+    private static readonly GRADIENT_PALETTE_FALLBACK_COUNT = 6;
+
+    private _themeSeriesPaletteHex(): string {
+        const theme = this._resolvedTheme();
+        const count =
+            theme.seriesPalette.length ||
+            HTMLPerspectiveViewerWebGLPluginElement.GRADIENT_PALETTE_FALLBACK_COUNT;
+        return colorsToCss(
+            resolvePalette(theme.seriesPalette, theme.gradientStops, count),
+        );
+    }
+
+    private _themeSeriesColorHex(idx: number): string {
+        const theme = this._resolvedTheme();
+        const count = Math.max(theme.seriesPalette.length, idx + 1);
+        return vec3ToHexColor(
+            resolvePalette(theme.seriesPalette, theme.gradientStops, count)[
+                idx
+            ],
+        );
+    }
+
+    private _themeGradientStopsSpec(): string {
+        return stopsToCss(this._resolvedTheme().gradientStops);
     }
 
     async draw(view: View): Promise<void> {
@@ -497,22 +819,36 @@ export class HTMLPerspectiveViewerWebGLPluginElement
         return this._drawImpl(view);
     }
 
+    /**
+     * Shared body of `draw` / `update`. No re-entrancy guard: the host
+     * serializes every rendering call (`draw`, `update`, `render`,
+     * `resize`) and `delete` on its per-renderer draw lock, so this
+     * method never overlaps itself or a teardown. The one exception —
+     * an external DOM disconnect `delete()`ing the element mid-draw —
+     * is absorbed by `RendererTransport`, whose post-`destroy()`
+     * requests settle immediately instead of pending forever.
+     */
     private async _drawImpl(view: View): Promise<void> {
-        const gen = ++this._generation;
-        const renderer = await this._ensureRenderer(view);
-        if (this._generation !== gen) {
+        let renderer: RendererTransport;
+        try {
+            renderer = await this._ensureRenderer(view);
+        } catch {
+            // Renderer was disposed mid-init (element disconnected
+            // during the async build) — nothing to draw.
             return;
         }
 
         renderer.setView(view);
         renderer.setBufferMaxCapacity(this._chartType.max_cells);
+        const panel = this.getAttribute("slot") ?? undefined;
         const viewer = this
             .parentElement as HTMLPerspectiveViewerElement | null;
-        const viewerConfig = (await viewer?.getViewConfig?.()) ?? {};
-        if (this._generation !== gen) {
+
+        if (viewer === null) {
             return;
         }
 
+        const viewerConfig = await viewer.getViewConfig({ panel });
         await renderer.loadAndRender({
             viewerConfig: {
                 group_by: viewerConfig?.group_by ?? [],
@@ -524,17 +860,78 @@ export class HTMLPerspectiveViewerWebGLPluginElement
     }
 
     async clear(): Promise<void> {
-        this._generation++;
         this._renderer?.clear();
     }
 
     async resize(): Promise<void> {
-        this._renderer?.resize();
+        // Hidden (an unslotted tab-stack panel, a `display: none` host):
+        // the 0×0 rect a hidden element reports would resize the worker
+        // canvas to zero — CLEARING the retained frame, so the next
+        // activation repaints from blank (the two-stage tab-switch
+        // artifact). Skip instead and keep the last frame for an instant,
+        // single-blit reveal — mirroring the datagrid's guard. The host's
+        // activation nudge is also a `resize()`, so a hidden panel's nudge
+        // is free by the same check.
+        if (!this.isConnected || this.offsetParent == null) {
+            return;
+        }
+
+        // AWAITED to the resized frame's PRESENT (the worker's
+        // `resizeAck`) — the host's presize protocol style-overrides
+        // this element to its target box and holds the layout commit on
+        // this promise, so resolving at message-post would commit the
+        // settings-pane layout against the old-dimensions bitmap (the
+        // aspect-ratio warp the datagrid's synchronous resize never
+        // shows).
+        await this._renderer?.resize();
+    }
+
+    /**
+     * OPTIONAL host presize protocol: render at the TARGET element box
+     * `(width, height)` — the box the host's pending layout commit will
+     * produce — holding the resulting frame offscreen, so nothing on
+     * screen changes during the round-trip. Resolves, once the resized
+     * frame is staged, to a present closure; the host calls it in the
+     * same task as the layout commit, landing geometry and pixels in
+     * one paint. Plugins without this method get the host's held
+     * style-override presize path instead.
+     */
+    async presize(width: number, height: number): Promise<(() => void) | void> {
+        if (
+            !this.isConnected ||
+            this.offsetParent == null ||
+            !this._renderer ||
+            !this._glCanvas
+        ) {
+            return;
+        }
+
+        // Target GL-canvas box = its current box shifted by the element's
+        // box delta — the chrome between the element edge and the canvas
+        // is constant across a resize.
+        const hostRect = this.getBoundingClientRect();
+        const glRect = this._glCanvas.getBoundingClientRect();
+        return await this._renderer.presize(
+            Math.max(0, glRect.width + (width - hostRect.width)),
+            Math.max(0, glRect.height + (height - hostRect.height)),
+        );
     }
 
     restyle() {
         this._renderer?.invalidateTheme();
-        return 5;
+    }
+
+    /**
+     * Clear any active selection state (pinned tooltip) WITHOUT emitting
+     * selection events — the host calls this when a global filter
+     * contributed by this panel's selection is removed from the global
+     * filter bar, so the pin can't outlive the filter it produced. The
+     * transport's `_lastInsertConfig` (remove-set memory) is deliberately
+     * RETAINED so a subsequent selection still replaces any leftover
+     * clauses rather than accumulating.
+     */
+    async deselect(): Promise<void> {
+        this._renderer?.deselect();
     }
 
     async render(view: View): Promise<Blob> {
@@ -558,12 +955,12 @@ export class HTMLPerspectiveViewerWebGLPluginElement
             ...config,
         };
 
+        this._columnsConfig = columns_config ?? {};
         this._renderer?.setPluginConfig(this._pluginConfig);
-        this._renderer?.setColumnsConfig(columns_config ?? {});
+        this._renderer?.setColumnsConfig(this._columnsConfig);
     }
 
     delete() {
-        this._generation++;
         if (this._rawEventForwarder) {
             this._rawEventForwarder.detach();
             this._rawEventForwarder = null;

@@ -24,6 +24,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <perspective/exports.h>
 #include <perspective/first.h>
 #include <perspective/portable.h>
@@ -227,6 +228,11 @@ enum t_filter_op {
     FILTER_OP_BEGINS_WITH,
     FILTER_OP_ENDS_WITH,
     FILTER_OP_CONTAINS,
+    FILTER_OP_NOT_BEGINS_WITH,
+    FILTER_OP_NOT_ENDS_WITH,
+    FILTER_OP_NOT_CONTAINS,
+    FILTER_OP_MATCHES,
+    FILTER_OP_NOT_MATCHES,
     FILTER_OP_OR,
     FILTER_OP_IN,
     FILTER_OP_NOT_IN,
@@ -297,7 +303,13 @@ enum t_aggtype {
     AGGTYPE_GMV
 };
 
+PERSPECTIVE_EXPORT std::optional<t_aggtype>
+maybe_str_to_aggtype(const std::string& str);
+
 PERSPECTIVE_EXPORT t_aggtype str_to_aggtype(const std::string& str);
+PERSPECTIVE_EXPORT bool is_implemented_aggtype(t_aggtype agg);
+PERSPECTIVE_EXPORT bool aggtype_takes_argument(t_aggtype agg);
+
 PERSPECTIVE_EXPORT t_aggtype _get_default_aggregate(t_dtype dtype);
 PERSPECTIVE_EXPORT std::string _get_default_aggregate_string(t_dtype dtype);
 

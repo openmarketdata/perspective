@@ -28,6 +28,7 @@ import {
     INNER_RING_PX,
 } from "./sunburst-layout";
 import { buildFacetGrid } from "../../layout/facet-grid";
+import { legendTreeGutter } from "../../interaction/legend-controller";
 import { withChromeCache } from "../common/chrome-cache";
 import {
     renderBreadcrumbs as renderTreeBreadcrumbs,
@@ -106,7 +107,12 @@ export function renderSunburstFrame(
               chart._colorMin < chart._colorMax;
     const breadcrumbH =
         !hasSplits && chart._breadcrumbIds.length > 1 ? BREADCRUMB_H : 0;
-    const legendW = hasLegend ? LEGEND_W : 0;
+    const legendW = legendTreeGutter(
+        chart._pluginConfig,
+        hasLegend,
+        LEGEND_W,
+        chart._colorMode === "series" ? chart._uniqueColorLabels.size : 0,
+    );
 
     if (hasSplits) {
         layoutFacetedSunburst(chart, cssWidth, cssHeight, legendW);
@@ -189,7 +195,9 @@ export function renderSunburstFrame(
         drawArcs(chart, gl, glManager, 0, chart._instanceCount);
     }
 
-    renderSunburstChromeOverlay(chart);
+    // Deferred past the GPU fence (see `_defer2D`) so the chrome canvas
+    // doesn't present ahead of the GL arcs on resize.
+    chart._defer2D(() => renderSunburstChromeOverlay(chart));
 }
 
 /**
@@ -499,7 +507,16 @@ function drawArcs(
 
 //  Chrome overlay (Canvas2D)
 
+/**
+ * Render the chrome overlay (labels, center text, hover highlight +
+ * tooltip).
+ */
 export function renderSunburstChromeOverlay(chart: SunburstChart): void {
+    paintSunburstChromeOverlay(chart);
+    chart.presentOverlay();
+}
+
+function paintSunburstChromeOverlay(chart: SunburstChart): void {
     if (!chart._chromeCanvas || chart._currentRootId === NULL_NODE) {
         return;
     }

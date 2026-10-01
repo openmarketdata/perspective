@@ -35,6 +35,7 @@ t_fterm::t_fterm(
     m_is_primary(is_primary) {
     m_use_interned = (op == FILTER_OP_EQ || op == FILTER_OP_NE)
         && threshold.m_type == DTYPE_STR;
+    compile_pattern();
 }
 
 t_fterm::t_fterm(
@@ -51,13 +52,34 @@ t_fterm::t_fterm(
     m_is_primary(false) {
     m_use_interned = (op == FILTER_OP_EQ || op == FILTER_OP_NE)
         && threshold.m_type == DTYPE_STR;
+    compile_pattern();
+}
+
+void
+t_fterm::compile_pattern() {
+    if ((m_op == FILTER_OP_MATCHES || m_op == FILTER_OP_NOT_MATCHES)
+        && m_threshold.m_type == DTYPE_STR) {
+        m_pattern =
+            std::make_shared<RE2>(m_threshold.to_string(), RE2::Quiet);
+    }
+}
+
+/**
+ * @brief Coerce a filter term to `dtype`, unless it is `null` (`DTYPE_NONE`),
+ * which has no numeric value and would coerce to `0`.
+ */
+static void
+coerce_term_numeric(t_tscalar& term, t_dtype dtype) {
+    if (term.m_type != DTYPE_NONE) {
+        term.set(term.coerce_numeric_dtype(dtype));
+    }
 }
 
 void
 t_fterm::coerce_numeric(t_dtype dtype) {
-    m_threshold.set(m_threshold.coerce_numeric_dtype(dtype));
+    coerce_term_numeric(m_threshold, dtype);
     for (auto& f : m_bag) {
-        f.set(f.coerce_numeric_dtype(dtype));
+        coerce_term_numeric(f, dtype);
     }
 }
 
@@ -74,7 +96,10 @@ t_fterm::get_expr() const {
         case FILTER_OP_GTEQ:
         case FILTER_OP_EQ:
         case FILTER_OP_NE:
-        case FILTER_OP_CONTAINS: {
+        case FILTER_OP_CONTAINS:
+        case FILTER_OP_NOT_CONTAINS:
+        case FILTER_OP_MATCHES:
+        case FILTER_OP_NOT_MATCHES: {
             ss << filter_op_to_str(m_op) << " ";
             ss << m_threshold.to_string(true);
         } break;
@@ -87,7 +112,9 @@ t_fterm::get_expr() const {
             ss << " )";
         } break;
         case FILTER_OP_BEGINS_WITH:
-        case FILTER_OP_ENDS_WITH: {
+        case FILTER_OP_ENDS_WITH:
+        case FILTER_OP_NOT_BEGINS_WITH:
+        case FILTER_OP_NOT_ENDS_WITH: {
             ss << "." << filter_op_to_str(m_op) << "( "
                << m_threshold.to_string(true) << " )";
         } break;

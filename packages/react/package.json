@@ -1,13 +1,26 @@
 {
     "name": "@perspective-dev/react",
-    "version": "4.5.1",
-    "description": "React component wrappers for `<perspective-viewer>` and `<perspective-workspace>`",
+    "version": "5.5.1",
+    "description": "React data grid, pivot table and charts for large, real-time and streaming datasets — React bindings for `<perspective-viewer>`.",
     "keywords": [
         "perspective",
-        "react",
-        "data",
+        "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
+        "charts",
+        "visualization",
+        "dashboard",
         "analytics",
-        "visualization"
+        "bi",
+        "streaming",
+        "real-time",
+        "wasm",
+        "webassembly",
+        "arrow",
+        "react",
+        "react-component",
+        "web-component"
     ],
     "homepage": "https://perspective-dev.github.io",
     "repository": {
@@ -34,15 +47,14 @@
         "access": "public"
     },
     "dependencies": {
-        "@perspective-dev/client": "workspace:",
-        "@perspective-dev/viewer": "workspace:",
-        "@perspective-dev/workspace": "workspace:",
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
         "@types/react": "catalog:",
         "react": "catalog:",
         "react-dom": "catalog:"
     },
     "devDependencies": {
-        "@perspective-dev/esbuild-plugin": "workspace:",
+        "@perspective-dev/esbuild-plugin": "workspace:^",
         "superstore-arrow": "catalog:",
         "typescript": "catalog:",
         "typedoc": "catalog:",

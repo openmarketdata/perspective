@@ -341,6 +341,7 @@ t_column::size() const {
 
 void
 t_column::set_size(t_uindex size) {
+    reserve(size);
 #ifdef PSP_COLUMN_VERIFY
     PSP_VERBOSE_ASSERT(
         size * get_dtype_size(m_dtype) <= m_data->capacity(),
@@ -617,6 +618,17 @@ void
 t_column::set_status(t_uindex idx, t_status status) {
     PSP_VERBOSE_ASSERT(is_status_enabled(), "Status not available for column");
     m_status->set_nth<t_status>(idx, status);
+}
+
+void
+t_column::set_valid_range(t_uindex offset, t_uindex len) {
+    if (!is_status_enabled() || len == 0) {
+        return;
+    }
+    static_assert(
+        sizeof(t_status) == 1, "set_valid_range assumes a 1-byte t_status"
+    );
+    std::memset(m_status->get_nth<t_status>(offset), STATUS_VALID, len);
 }
 
 void

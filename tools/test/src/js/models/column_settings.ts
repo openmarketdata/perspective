@@ -12,7 +12,7 @@
 
 import { Locator, expect } from "@playwright/test";
 import { PageView } from "./page";
-import { Type } from "@perspective-dev/client";
+import type { ColumnType } from "@perspective-dev/client";
 
 export class ColumnSettingsSidebar {
     view: PageView;
@@ -60,14 +60,24 @@ export class ColumnSettingsSidebar {
     }
 
     async getTabs(): Promise<string[]> {
-        return await this.tabTitle.allInnerTexts();
+        await this.container
+            .locator("#settings_tab_bar .tab-title")
+            .first()
+            .waitFor();
+        return await this.tabTitle.evaluateAll((els) =>
+            els.map((e) => e.id),
+        );
     }
 
     async getSelectedTab(): Promise<string> {
-        return await this.selectedTab.innerText();
+        return (
+            (await this.selectedTab
+                .locator(".tab-title")
+                .getAttribute("id")) ?? ""
+        );
     }
 
-    async getType(): Promise<Type | "expression"> {
+    async getType(): Promise<ColumnType | "expression"> {
         const classList = await this.typeIcon.evaluate((icon) =>
             Array.from(icon.classList),
         );
@@ -80,7 +90,7 @@ export class ColumnSettingsSidebar {
             "datetime",
         ]) {
             if (classList.includes(ty)) {
-                return <Type>ty;
+                return <ColumnType>ty;
             }
         }
         if (classList.includes("expression")) {

@@ -11,14 +11,7 @@
  * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ */
 
 perspective-viewer,
-perspective-workspace,
-perspective-copy-menu,
-perspective-export-menu,
-perspective-dropdown,
-perspective-date-column-style,
-perspective-datetime-column-style,
-perspective-number-column-style,
-perspective-string-column-style {
+perspective-viewer-tab {
     /* Icons */
     --psp-column-type--integer--mask-image: url("../svg/number-type.svg");
     --psp-column-type--float--mask-image: var(
@@ -51,10 +44,11 @@ perspective-string-column-style {
     --psp-icon--sort-none--mask-image: url("../svg/sort-none-icon.svg");
     --psp-icon--add-expression--mask-image: url("../svg/expression.svg");
     --psp-icon--close--mask-image: url("../svg/close-icon.svg");
+    --psp-icon--pin--mask-image: url("../svg/pin-icon.svg");
     --psp-label--inactive-column-selector--content: url("../svg/checkbox-unchecked-icon.svg");
     --psp-label--active-column-selector--content: url("../svg/checkbox-checked-icon.svg");
-    --psp-icon--select-arrow-light--mask-image: url("../svg/dropdown-selector-light.svg");
-    --psp-icon--select-arrow-dark--mask-image: url("../svg/dropdown-selector.svg");
+    --psp-icon--select-arrow--mask-image: url("../svg/dropdown-selector.svg");
+    --psp-icon--active-indicator--mask-image: url("../svg/active-indicator.svg");
     --psp-icon-overflow-hint--content: "!";
     --psp-label--reset-button-icon--content: "refresh";
     --psp-label--save-button-icon--content: "save";
@@ -62,10 +56,13 @@ perspective-string-column-style {
     --psp-icon--updating--mask-image: url("../svg/updating.gif");
     --psp-icon--downloading--mask-image: url("../svg/downloading.gif");
     --psp-icon--status-ok--mask-image: url(../svg/status_ok.svg);
+    --psp-icon--status-pending--mask-image: url(../svg/status_pending.svg);
     --psp-icon--export--mask-image: url("../svg/export-icon.svg");
     --psp-icon--free-scroll--mask-image: url("../svg/free-scroll-icon.svg");
+    --psp-icon--lock--mask-image: url("../svg/lock.svg");
     --psp-icon--reset--mask-image: url("../svg/revert-icon.svg");
     --psp-icon--copy--mask-image: url("../svg/duplicate-icon.svg");
+    --psp-icon--new-panel--mask-image: url("../svg/new-panel-icon.svg");
     --psp-icon--theme--mask-image: url("../svg/theme-icon.svg");
 
     --psp-icon--drawer-tab--mask-image: url(../svg/drawer-tab.svg);

@@ -13,12 +13,15 @@
 @import "./defaults.css";
 
 perspective-viewer,
-perspective-viewer[theme="Solarized"] {
+perspective-viewer[theme="Solarized"],
+perspective-viewer [theme="Solarized"] {
     --psp-theme-name: "Solarized";
 }
 
-perspective-viewer[theme="Solarized"] {
+perspective-viewer[theme="Solarized"],
+perspective-viewer [theme="Solarized"] {
     /* perspective-viewer-solarized--colors */
+    color-scheme: light;
     color: #586e75;
     background-color: #eee8d5;
     --psp--color: #586e75;
@@ -55,31 +58,15 @@ perspective-viewer[theme="Solarized"] {
 
     --psp-charts--series-6--color: #6c71c4;
     --psp-charts--series-7--color: #d33682;
+    --psp-datagrid--series-1--color: #268bd2;
+    --psp-datagrid--series-2--color: #cb4b16;
+    --psp-datagrid--series-3--color: #b58900;
+    --psp-datagrid--series-4--color: #859900;
+    --psp-datagrid--series-5--color: #2aa198;
+    --psp-datagrid--series-6--color: #6c71c4;
+    --psp-datagrid--series-7--color: #d33682;
 }
 
 x {
     color: #cb4b16;
-}
-
-perspective-copy-menu[theme="Solarized"],
-perspective-export-menu[theme="Solarized"],
-perspective-dropdown[theme="Solarized"],
-perspective-date-column-style[theme="Solarized"],
-perspective-datetime-column-style[theme="Solarized"],
-perspective-number-column-style[theme="Solarized"],
-perspective-string-column-style[theme="Solarized"] {
-    /* perspective-viewer-solarized--colors */
-    color: #586e75;
-    --psp--color: #586e75;
-    --psp-active--color: #268bd2;
-    --psp-error--color: #cb4b16;
-    --psp-inactive--color: #93a1a1;
-    --psp-inactive--border-color: var(--psp-inactive--color);
-    --psp--background-color: #fdf6e3;
-    --psp-column-type--float--color: #268bd2;
-    --psp-column-type--string--color: #cb4b16;
-    --psp-column-type--date--color: #2aa198;
-    --psp-column-type--boolean--color: #b58900;
-
-    background-color: #fdf6e3;
 }

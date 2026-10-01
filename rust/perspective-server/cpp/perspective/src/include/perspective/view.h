@@ -34,6 +34,11 @@
 
 namespace perspective {
 
+/**
+ * @brief Arrow IPC body compression applied by `View::to_arrow`.
+ */
+enum class t_arrow_compression : std::uint8_t { NONE, LZ4, ZSTD };
+
 void write_scalar(
     t_tscalar scalar,
     bool is_formatted,
@@ -277,7 +282,7 @@ public:
         std::int32_t start_col,
         std::int32_t end_col,
         bool emit_group_by,
-        bool compress,
+        t_arrow_compression compression,
         bool emit_legacy_row_path_names = true
     ) const;
 
@@ -313,7 +318,7 @@ public:
     std::shared_ptr<std::string> data_slice_to_arrow(
         std::shared_ptr<t_data_slice<CTX_T>> data_slice,
         bool emit_group_b,
-        bool compress,
+        t_arrow_compression compression,
         bool emit_legacy_row_path_names = true
     ) const;
 
@@ -452,6 +457,16 @@ private:
     t_uindex m_row_offset;
     t_uindex m_col_offset;
 
+    bool m_split_rollup;
+
     std::shared_ptr<t_view_config> m_view_config;
 };
+
+/**
+ * @brief The schema a `View` built from `config` over `schema` reports,
+ * derived statically from the config with no context constructed.
+ */
+PERSPECTIVE_EXPORT std::map<std::string, std::string> describe_view_schema(
+    const t_view_config& config, const t_schema& schema, bool pivoted
+);
 } // end namespace perspective

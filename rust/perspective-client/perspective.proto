@@ -116,6 +116,7 @@ enum SortOp {
 message Request {
     uint32 msg_id = 1;
     string entity_id = 2;
+    reserved 9; // `TableValidateExprReq`, replaced by `TableDescribeReq`
     oneof client_req {
         // Minimum Virtual API (theoretical).
         GetFeaturesReq get_features_req = 3;
@@ -125,7 +126,7 @@ message Request {
         TableMakeViewReq table_make_view_req = 6;
         TableSchemaReq table_schema_req = 7;
         TableSizeReq table_size_req = 8;
-        TableValidateExprReq table_validate_expr_req = 9;
+        TableDescribeReq table_describe_req = 41;
         ViewColumnPathsReq view_column_paths_req = 10;
         ViewDeleteReq view_delete_req = 11;
         ViewDimensionsReq view_dimensions_req = 12;
@@ -159,12 +160,15 @@ message Request {
         ViewOnDeleteReq view_on_delete_req = 34;
         ViewRemoveDeleteReq view_remove_delete_req = 35;
         MakeJoinTableReq make_join_table_req = 38;
+        ViewOnRemoveReq view_on_remove_req = 39;
+        ViewRemoveOnRemoveReq view_remove_on_remove_req = 40;
     }
 }
 
 message Response {
     uint32 msg_id = 1;
     string entity_id = 2;
+    reserved 9; // `TableValidateExprResp`, replaced by `TableDescribeResp`
     oneof client_resp {
         GetFeaturesResp get_features_resp = 3;
         GetHostedTablesResp get_hosted_tables_resp = 4;
@@ -173,7 +177,7 @@ message Response {
         TableMakeViewResp table_make_view_resp = 6;
         TableSchemaResp table_schema_resp = 7;
         TableSizeResp table_size_resp = 8;
-        TableValidateExprResp table_validate_expr_resp = 9;
+        TableDescribeResp table_describe_resp = 41;
         ViewColumnPathsResp view_column_paths_resp = 10;
         ViewDeleteResp view_delete_resp = 11;
         ViewDimensionsResp view_dimensions_resp = 12;
@@ -202,6 +206,8 @@ message Response {
         ViewOnDeleteResp view_on_delete_resp = 34;
         ViewRemoveDeleteResp view_remove_delete_resp = 35;
         MakeJoinTableResp make_join_table_resp = 38;
+        ViewOnRemoveResp view_on_remove_resp = 39;
+        ViewRemoveOnRemoveResp view_remove_on_remove_resp = 40;
         ServerError server_error = 50;
     }
 }
@@ -217,6 +223,17 @@ enum GroupRollupMode {
     TOTAL = 2;
 }
 
+// The `split_by` corollary to `GroupRollupMode`. `FLAT` (the wire default)
+// is the historical behavior - only full-depth split combinations are
+// emitted as columns. `ROLLUP` additionally emits grand-total and subtotal
+// column groups in pre-order ("totals before"). Enum value names are
+// prefixed because proto enum values share their parent scope with
+// `GroupRollupMode`'s.
+enum SplitRollupMode {
+    SPLIT_ROLLUP_MODE_FLAT = 0;
+    SPLIT_ROLLUP_MODE_ROLLUP = 1;
+}
+
 // Informs the client of the feature set, e.g. what to expect in the
 // `ViewConfig` message.
 message GetFeaturesReq {}
@@ -229,6 +246,14 @@ message GetFeaturesResp {
     map<uint32, ColumnTypeOptions> filter_ops = 6;
     map<uint32, AggregateOptions> aggregates = 7;
     repeated GroupRollupMode group_rollup_mode = 8;
+    map<uint32, WindowAggregateOptions> window_aggregates = 9;
+
+    bool unordered = 10;
+    repeated SplitRollupMode split_rollup_mode = 11;
+
+    message WindowAggregateOptions {
+        repeated WindowAggregateArgs options = 1;
+    }
 
     message ColumnTypeOptions {
         repeated string options = 1;
@@ -242,6 +267,14 @@ message GetFeaturesResp {
         string name = 1;
         repeated ColumnType args = 2;
     }
+}
+
+message WindowAggregateArgs {
+    string name = 1;
+    repeated string frames = 2;
+    bool offset = 3;
+    bool alpha = 4;
+    optional ColumnType result_type = 5;
 }
 
 // `Client::get_hosted_tables`
@@ -276,20 +309,34 @@ message TableSchemaResp {
     Schema schema = 1;
 }
 
-// `Table::validate_expressions`
-// TODO: This should be just `validate()`
-message TableValidateExprReq {
-    map<string, string> column_to_expr = 1;
+// `Table::describe` - validate a complete `ViewConfig` against this table and
+// report its result schema, without creating a `View`.
+message TableDescribeReq {
+    ViewConfig config = 1;
 }
-message TableValidateExprResp {
+message TableDescribeResp {
+    // Every VALID expression's type, whether or not the config as a whole is
+    // valid.
     map<string, ColumnType> expression_schema = 1;
-    map<string, ExprValidationError> errors = 2;
-    map<string, string> expression_alias = 3;
-    message ExprValidationError {
-        string error_message = 1;
-        uint32 line = 2;
-        uint32 column = 3;
+    map<string, ExpressionError> expression_errors = 2;
+    oneof result {
+        // Present IFF `expression_errors` is empty and the whole config is
+        // valid.
+        ViewDescription view = 3;
+
+        // The first non-expression config error, when the expressions are all
+        // valid but the config is not.
+        string config_error = 4;
     }
+}
+message ViewDescription {
+    // Equal to `View::schema()` of a `View` built from the same config.
+    map<string, ColumnType> schema = 1;
+}
+message ExpressionError {
+    string error_message = 1;
+    uint32 line = 2;
+    uint32 column = 3;
 }
 
 // `Table::view`
@@ -339,7 +386,15 @@ message MakeTableReq {
         // (memory-mapped file on native; OPFS on WASM) instead of memory.
         // Orthogonal to `make_table_type`, so it is a standalone field.
         optional bool page_to_disk = 3;
+
+        optional ListFlatten list_flatten = 4;
     }
+}
+
+enum ListFlatten {
+    LIST_FLATTEN_ZIP = 0;
+    LIST_FLATTEN_CARTESIAN = 1;
+    LIST_FLATTEN_STRINGIFY = 2;
 }
 message MakeTableResp {}
 
@@ -380,6 +435,19 @@ message TableRemoveDeleteReq {
     uint32 id = 1;
 }
 message TableRemoveDeleteResp {}
+
+// `View::on_remove`
+message ViewOnRemoveReq {}
+message ViewOnRemoveResp {
+    optional bytes indices = 1;
+    uint32 port_id = 2;
+}
+
+// `View::remove_remove`
+message ViewRemoveOnRemoveReq {
+    uint32 id = 1;
+}
+message ViewRemoveOnRemoveResp {}
 
 // `Table::update`
 message TableUpdateReq {
@@ -539,6 +607,30 @@ message ServerSystemInfoResp {
 }
 
 
+message WindowSpec {
+    string source = 2;
+
+    // The aggregate, in the data model's own vocabulary - see
+    // `GetFeaturesResp.WindowAggregateArgs`. A string rather than an enum so
+    // that a `View` can carry an op the built-in engine has never heard of,
+    // e.g. kdb+'s `mdev`.
+    string op = 3;
+    repeated string partition_by = 4;
+    Order order_by = 5;
+    oneof frame {
+        uint32 rows = 6;
+        double range = 7;
+        google.protobuf.NullValue cumulative = 8;
+    }
+    optional uint32 offset = 9;
+    optional double alpha = 10;
+
+    message Order {
+        string column = 1;
+        bool desc = 2;
+    }
+}
+
 message ViewConfig {
     repeated string group_by = 1;
     repeated string split_by = 2;
@@ -550,6 +642,8 @@ message ViewConfig {
     FilterReducer filter_op = 8;
     optional uint32 group_by_depth = 9;
     optional GroupRollupMode group_rollup_mode = 10;
+    map<string, WindowSpec> windows = 11;
+    optional SplitRollupMode split_rollup_mode = 12;
 
     message AggList {
         repeated string aggregations = 1;

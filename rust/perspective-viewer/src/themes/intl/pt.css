@@ -10,13 +10,12 @@
  * ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
  * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ */
 
-perspective-viewer,
-perspective-dropdown {
+perspective-viewer {
     /* Config */
     --psp-label--group-by--content: "Agrupar por";
     --psp-label--split-by--content: "Dividir por";
     --psp-label--sort--content: "Ordenar por";
-    --psp-label--filter--content: "Onde";
+    --psp-label--filter--content: "Filtrar";
     --psp-label--transpose-button--content: "Trocar";
     --psp-label--config-button--content: "Configurar";
     --psp-label--all-columns--content: "Todas as colunas";
@@ -25,17 +24,21 @@ perspective-dropdown {
     /* Plugin names */
     --psp-plugin-name--datagrid--content: "Grade de dados";
     --psp-plugin-name--treemap--content: "Mapa de árvore";
-    --psp-plugin-name--sunburst--content: "reluzente";
+    --psp-plugin-name--sunburst--content: "Sunburst";
     --psp-plugin-name--heatmap--content: "Mapa de calor";
-    --psp-plugin-name--x-bar--content: "Barra X";
-    --psp-plugin-name--y-bar--content: "E Barra";
-    --psp-plugin-name--y-line--content: "e linha";
+    --psp-plugin-name--x-bar--content: "Barras X";
+    --psp-plugin-name--y-bar--content: "Barras Y";
+    --psp-plugin-name--y-line--content: "Linha Y";
     --psp-plugin-name--x-y-line--content: "Linha X/Y";
     --psp-plugin-name--x-y-scatter--content: "Dispersão X/Y";
     --psp-plugin-name--y-scatter--content: "Dispersão Y";
-    --psp-plugin-name--y-area--content: "e área";
-    --psp-plugin-name--ohlc--content: "Ai";
-    --psp-plugin-name--candlestick--content: "Castiçal";
+    --psp-plugin-name--y-area--content: "Área Y";
+    --psp-plugin-name--ohlc--content: "OHLC";
+    --psp-plugin-name--candlestick--content: "Candlestick";
+    --psp-plugin-name--density--content: "Densidade";
+    --psp-plugin-name--map-scatter--content: "Dispersão no mapa";
+    --psp-plugin-name--map-line--content: "Linha no mapa";
+    --psp-plugin-name--map-density--content: "Densidade no mapa";
 
     /* Column Selector names */
     --psp-label--column-columns--content: "Colunas";
@@ -44,6 +47,8 @@ perspective-dropdown {
     --psp-label--column-color--content: "Cor";
     --psp-label--column-size--content: "Tamanho";
     --psp-label--column-symbol--content: "Símbolo";
+    --psp-label--column-longitude--content: "Longitude";
+    --psp-label--column-latitude--content: "Latitude";
     --psp-label--column-label--content: "Rótulo";
     --psp-label--column-tooltip--content: "Dica";
     --psp-label--add-expression-button--content: "Nova Coluna";
@@ -51,49 +56,51 @@ perspective-dropdown {
     /* Toolbar */
     --psp-label--no-results--content: "Coluna inválida";
     --psp-datagrid--column-edit-button--content: "Editar";
-    --psp-label--copy-button--content: "cópia de";
+    --psp-label--copy-button--content: "Copiar";
     --psp-label--export-button--content: "Exportar";
-    --psp-label--reset-button--content: "Reiniciar";
+    --psp-label--reset-button--content: "Redefinir";
+    --psp-label--new-panel-button--content: "Novo";
+    --psp-label--new-from-table--content: "Novo a partir de tabela";
+    --psp-label--new-from-panel--content: "Novo a partir de painel";
+    --psp-label--apply-button--content: "Aplicar";
+    --psp-label--paste-button--content: "Colar";
     --psp-label--edit-mode-read-only--content: "Somente leitura";
     --psp-label--edit-mode-edit--content: "Edição de texto";
     --psp-label--edit-mode-select-row--content: "Selecionar linha";
     --psp-label--edit-mode-select-column--content: "Selecionar coluna";
     --psp-label--edit-mode-select-region--content: "Selecionar região";
-    --psp-label--scroll-lock-toggle--content: "Rolagem Grátis";
+    --psp-label--scroll-lock-toggle--content: "Rolagem livre";
     --psp-label--scroll-lock-alt-toggle--content: "Alinhar rolagem";
 
     /* Column Settings */
     --psp-label--color--content: "Cor";
-    --psp-label--format--content: "Formatar";
     --psp-label--timezone--content: "Fuso horário";
     --psp-label--date-style--content: "Estilo de data";
     --psp-label--time-style--content: "Estilo de tempo";
-    --psp-label--foreground--content: "Primeiro plano";
-    --psp-label--background--content: "Fundo";
-    --psp-label--number-fg-mode--content: "Primeiro plano";
-    --psp-label--number-bg-mode--content: "Fundo";
-    --psp-label--pos-bg-color--content: "Fundo";
-    --psp-label--datetime-color-mode--content: "Cor";
-    --psp-label--string-color-mode--content: "Cor";
-    --psp-label--series--content: "Series";
+    --psp-label--fg-mode--content: "Primeiro plano";
+    --psp-label--bg-mode--content: "Fundo";
+    --psp-label--fg-color--content: "Primeiro plano";
+    --psp-label--bg-color--content: "Fundo";
+    --psp-label--series--content: "Série";
     --psp-label--color-range--content: "Gama de cores";
     --psp-label--style--content: "Estilo";
     --psp-label--stack--content: "Empilhar";
     --psp-label--alt-axis--content: "Eixo Alternativo";
-    --psp-label--interpolate--content: "Interpolar";
+    --psp-label--interpolate--content: "Interpolar nulos";
     --psp-label--minimum-integer-digits--content: "Dígitos inteiros mínimos";
     --psp-label--rounding-increment--content: "Incremento de arredondamento";
     --psp-label--notation--content: "Notação";
     --psp-label--use-grouping--content: "Usar agrupamento";
-    --psp-label--sign-display--content: "Exibição de sinalização";
-    --psp-label--max-value--content: "Valor máximo";
+    --psp-label--sign-display--content: "Exibição de sinal";
+    --psp-label--enabled--content: "Ativado";
+    --psp-label--disabled--content: "Desativado";
     --psp-label--fg-gradient--content: "Valor máximo";
     --psp-label--bg-gradient--content: "Valor máximo";
     --psp-label--rounding-priority--content: "Prioridade de arredondamento";
     --psp-label--rounding-mode--content: "Modo de arredondamento";
     --psp-label--trailing-zero-display--content: "Exibição de zero à direita";
     --psp-label--fractional-digits--content: "Dígitos Fracionários";
-    --psp-label--significant-digits--content: "Dígitos significantes";
+    --psp-label--significant-digits--content: "Dígitos significativos";
     --psp-label--year--content: "Ano";
     --psp-label--month--content: "Mês";
     --psp-label--day--content: "Dia";
@@ -103,23 +110,61 @@ perspective-dropdown {
     --psp-label--second--content: "Segundo";
     --psp-label--fractional-seconds--content: "Segundos fracionários";
     --psp-label--hours--content: "12/24 horas";
-    --psp-label--aggregate-depth--content: "Profundidad agregada";
+    --psp-label--aggregate-depth--content: "Profundidade de agregação";
 
     /* Tabs */
     --psp-label--style-tab--content: "Estilo";
-    --psp-label--attributes-tab--content: "Atributos";
+    --psp-label--attributes-tab--content: "Expressão";
+    --psp-label--window-tab--content: "Janela";
+    --psp-label--window-source--content: "Coluna";
+    --psp-label--window-order-by--content: "Ordenar por";
+    --psp-label--window-partition-by--content: "Particionar por";
+    --psp-label--window-frame--content: "Quadro";
+    --psp-label--window-offset--content: "Deslocamento";
+    --psp-label--window-alpha--content: "Alfa";
     --psp-label--query-tab--content: "Consulta";
     --psp-label--plugin-tab--content: "Plugin";
     --psp-label--debug-tab--content: "JSON";
+    --psp-label--chat-tab--content: "Conversa";
+
+    /* Chat panel */
+    --psp-label--chat-reasoning--content: "Raciocínio";
+    --psp-label--chat-send--content: "Enviar";
+    --psp-label--chat-stop--content: "Parar";
+    --psp-label--chat-placeholder--content: "Pergunte sobre seus dados…";
+
+    /* Plugin-declared pivot roles (PluginStaticConfig) */
+    --psp-label--role--x-axis--content: "Eixo X";
+    --psp-label--role--y-axis--content: "Eixo Y";
+    --psp-label--role--series--content: "Séries";
+    --psp-label--role--hierarchy--content: "Hierarquia";
+    --psp-label--role--facets--content: "Facetas";
+    --psp-label--role--row-groups--content: "Grupos de linhas";
+    --psp-label--role--column-groups--content: "Grupos de colunas";
 
     /* Plugin settings */
     --psp-label--edit-mode--content: "Modo de edição";
     --psp-label--scroll-lock--content: "Bloqueio de rolagem";
-    --psp-label--chart-type--content: "Tipo de gráfico";
+    --psp-label--column-menus--content: "Menus de coluna";
+    --psp-label--group-font--content: "Fonte";
+    --psp-label--group-rows--content: "Linhas";
+    --psp-label--link--content: "Link";
+    --psp-label--font-family--content: "Família da fonte";
+    --psp-label--font-size--content: "Tamanho da fonte";
+    --psp-label--request-local-fonts--content: "Fontes locais";
+    --psp-label--local-fonts-blocked--content: "Fontes locais bloqueadas";
+    --psp-label--request-local-fonts-title--content: "Permitir acesso às fontes instaladas neste dispositivo";
+    --psp-label--local-fonts-blocked-title--content: "O acesso às fontes locais está bloqueado para este site. Permita-o nas configurações do site do navegador para listá-las aqui.";
+    --psp-label--word-wrap--content: "Quebra de linha";
+    --psp-label--align--content: "Alinhamento";
+    --psp-label--row-height--content: "Altura da linha";
+    --psp-label--zebra-rows--content: "Linhas zebradas";
+    --psp-label--zebra-color--content: "Cor zebrada";
+    --psp-label--chart-type--content: "Tipo de glifo";
 
     /* Plugin settings — viewer-charts */
     --psp-label--auto-alt-y-axis--content: "Eixo Y duplo automático";
-    --psp-label--facet-mode--content: "Modo de faceta";
+    --psp-label--facet-mode--content: "Modo de divisão";
     --psp-label--facet-zoom-mode--content: "Zoom de faceta";
     --psp-label--series-zoom-mode--content: "Zoom de séries";
     --psp-label--line-width-px--content: "Largura da linha";
@@ -136,4 +181,27 @@ perspective-dropdown {
     --psp-label--gradient-heat-max--content: "Calor máximo";
     --psp-label--map-tile-provider--content: "Provedor de mapa";
     --psp-label--map-tile-alpha--content: "Opacidade do mapa";
+    --psp-label--numeric-axes--content: "Eixos numéricos";
+    --psp-label--legend-mode--content: "Modo de posicionamento";
+    --psp-label--legend-size-mode--content: "Modo de tamanho";
+    --psp-label--legend-width-px--content: "Largura da legenda";
+    --psp-label--legend-height-px--content: "Altura da legenda";
+    --psp-label--legend-anchor--content: "Âncora da legenda";
+    --psp-label--legend-x--content: "Deslocamento X da legenda";
+    --psp-label--legend-y--content: "Deslocamento Y da legenda";
+    --psp-label--legend-opacity--content: "Opacidade da legenda";
+    --psp-label--tooltip-max-column-px--content: "Largura máxima da coluna";
+    --psp-label--tooltip-opacity--content: "Opacidade";
+
+    --psp-label--group-axes--content: "Eixos";
+    --psp-label--group-facets--content: "Facetas";
+    --psp-label--group-glyph--content: "Glifos";
+    --psp-label--group-density--content: "Densidade";
+    --psp-label--group-basemap--content: "Mapa base";
+    --psp-label--group-legend--content: "Legenda";
+    --psp-label--group-tooltip--content: "Dicas";
+    --psp-label--group-color--content: "Cor";
+    --psp-label--group-column--content: "Coluna";
+    --psp-label--group-format--content: "Formato";
+    --psp-label--column-size-override--content: "Largura da coluna";
 }

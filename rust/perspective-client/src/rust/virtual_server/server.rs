@@ -18,19 +18,21 @@ use prost::bytes::{Bytes, BytesMut};
 
 use super::data::RowPathStyle;
 use super::error::VirtualServerError;
+use super::generic_sql_model::{column_path_source, sort_column_paths};
 use super::handler::VirtualServerHandler;
 use crate::config::{ViewConfig, ViewConfigUpdate};
 use crate::proto::response::ClientResp;
-use crate::proto::table_validate_expr_resp::ExprValidationError;
 use crate::proto::{
     ColumnType, GetFeaturesResp, GetHostedTablesResp, MakeTableResp, Request, Response,
-    ServerError, TableMakePortResp, TableMakeViewResp, TableOnDeleteResp, TableRemoveDeleteResp,
-    TableSchemaResp, TableSizeResp, TableValidateExprResp, ViewColumnPathsResp, ViewDeleteResp,
-    ViewDimensionsResp, ViewExpressionSchemaResp, ViewGetConfigResp, ViewGetMinMaxResp,
-    ViewOnDeleteResp, ViewOnUpdateResp, ViewRemoveDeleteResp, ViewRemoveOnUpdateResp,
-    ViewSchemaResp, ViewToArrowResp, ViewToColumnsStringResp, ViewToCsvResp,
-    ViewToNdjsonStringResp, ViewToRowsStringResp,
+    ServerError, TableDescribeResp, TableMakePortResp, TableMakeViewResp, TableOnDeleteResp,
+    TableRemoveDeleteResp, TableSchemaResp, TableSizeResp, ViewColumnPathsResp, ViewDeleteResp,
+    ViewDescription, ViewDimensionsResp, ViewExpressionSchemaResp, ViewGetConfigResp,
+    ViewGetMinMaxResp, ViewOnDeleteResp, ViewOnRemoveResp, ViewOnUpdateResp, ViewRemoveDeleteResp,
+    ViewRemoveOnRemoveResp, ViewRemoveOnUpdateResp, ViewSchemaResp, ViewToArrowResp,
+    ViewToColumnsStringResp, ViewToCsvResp, ViewToNdjsonStringResp, ViewToRowsStringResp,
+    table_describe_resp,
 };
+use crate::table::{DescribeError, Description};
 
 macro_rules! respond {
     ($msg:ident, $name:ident { $($rest:tt)* }) => {{
@@ -59,6 +61,10 @@ pub struct VirtualServer<T: VirtualServerHandler> {
     view_to_table: IndexMap<String, String>,
     view_configs: IndexMap<String, ViewConfig>,
     view_schemas: IndexMap<String, IndexMap<String, ColumnType>>,
+
+    /// Per-view `table_describe` answers, computed LAZILY on the first
+    /// `ViewExpressionSchemaReq` for that view — never on view creation.
+    view_descriptions: IndexMap<String, Description>,
 }
 
 impl<T: VirtualServerHandler> VirtualServer<T> {
@@ -69,6 +75,7 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
             view_configs: IndexMap::default(),
             view_to_table: IndexMap::default(),
             view_schemas: IndexMap::default(),
+            view_descriptions: IndexMap::default(),
         }
     }
 
@@ -114,16 +121,21 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
         }
 
         if to_psp_format {
+            // `view.schema()` is keyed by *source* column name, matching the
+            // native engine, while the cached schema is keyed by the view's
+            // actual (possibly pivoted-path) SQL column names.
+            let config = self.view_configs.get(entity_id).unwrap();
             Ok(self
                 .view_schemas
                 .get(entity_id)
                 .unwrap()
                 .iter()
                 .map(|(k, v)| {
-                    (
-                        k.split("_").collect::<Vec<_>>().last().unwrap().to_string(),
-                        *v,
-                    )
+                    let name = column_path_source(k, config)
+                        .map(|(_, col)| col.to_string())
+                        .unwrap_or_else(|| k.clone());
+
+                    (name, *v)
                 })
                 .collect())
         } else {
@@ -172,6 +184,19 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
                     .insert(req.view_id.clone(), msg.entity_id.clone());
 
                 let mut config: ViewConfigUpdate = req.config.clone().unwrap_or_default().into();
+
+                // An UNORDERED store has no natural row order to fall back
+                // on, so every window must carry an explicit `order_by`.
+                if let Some(windows) = &config.windows
+                    && windows.values().any(|w| w.order_by.is_none())
+                    && self.handler.get_features().await?.unordered
+                {
+                    return Err(VirtualServerError::Other(
+                        "This data store is unordered - windows require an explicit `order_by`"
+                            .to_string(),
+                    ));
+                }
+
                 let bytes = respond!(msg, TableMakeViewResp {
                     view_id: self
                         .handler
@@ -187,34 +212,43 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
                     size: self.handler.table_size(msg.entity_id.as_str()).await?
                 })
             },
-            TableValidateExprReq(req) => {
-                let mut expression_schema = HashMap::<String, i32>::default();
-                let mut expression_alias = HashMap::<String, String>::default();
-                let mut errors = HashMap::<String, ExprValidationError>::default();
-                for (name, ex) in req.column_to_expr.iter() {
-                    let _ = expression_alias.insert(name.clone(), ex.clone());
-                    match self
-                        .handler
-                        .table_validate_expression(&msg.entity_id, ex.as_str())
-                        .await
-                    {
-                        Ok(dtype) => {
-                            let _ = expression_schema.insert(name.clone(), dtype as i32);
-                        },
-                        Err(e) => {
-                            let _ = errors.insert(name.clone(), ExprValidationError {
-                                error_message: format!("{}", e),
-                                line: 0,
-                                column: 0,
-                            });
-                        },
-                    }
-                }
+            TableDescribeReq(req) => {
+                let config: ViewConfig = req.config.unwrap_or_default().into();
+                let verdict = self
+                    .handler
+                    .table_describe(msg.entity_id.as_str(), &config)
+                    .await?;
 
-                respond!(msg, TableValidateExprResp {
-                    expression_schema,
-                    errors,
-                    expression_alias,
+                let (expression_schema, expression_errors, result) = match verdict {
+                    Ok(d) => (
+                        d.expression_schema,
+                        HashMap::new(),
+                        Some(table_describe_resp::Result::View(ViewDescription {
+                            schema: d
+                                .view_schema
+                                .into_iter()
+                                .map(|(x, y)| (x, y as i32))
+                                .collect(),
+                        })),
+                    ),
+                    Err(DescribeError::Expressions {
+                        expression_schema,
+                        errors,
+                    }) => (expression_schema, errors, None),
+                    Err(DescribeError::Config(msg)) => (
+                        HashMap::new(),
+                        HashMap::new(),
+                        Some(table_describe_resp::Result::ConfigError(msg)),
+                    ),
+                };
+
+                respond!(msg, TableDescribeResp {
+                    expression_schema: expression_schema
+                        .into_iter()
+                        .map(|(x, y)| (x, y as i32))
+                        .collect(),
+                    expression_errors,
+                    result,
                 })
             },
             ViewSchemaReq(_) => {
@@ -259,45 +293,54 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
                 })
             },
             ViewExpressionSchemaReq(_) => {
-                let mut schema = HashMap::<String, i32>::default();
-                let table_id = self.view_to_table.get(&msg.entity_id);
-                for (name, ex) in self
-                    .view_configs
-                    .get(&msg.entity_id)
-                    .unwrap()
-                    .expressions
-                    .iter()
-                {
-                    match self
+                let view_id = msg.entity_id.clone();
+                if !self.view_descriptions.contains_key(&view_id) {
+                    let table_id = self
+                        .view_to_table
+                        .get(&view_id)
+                        .cloned()
+                        .ok_or_else(|| VirtualServerError::UnknownViewId(view_id.clone()))?;
+
+                    let config = self.view_configs.get(&view_id).unwrap().clone();
+                    let description = self
                         .handler
-                        .table_validate_expression(table_id.unwrap(), ex.as_str())
-                        .await
-                    {
-                        Ok(dtype) => {
-                            let _ = schema.insert(name.clone(), dtype as i32);
-                        },
-                        Err(_e) => {
-                            // TODO: handle error
-                        },
-                    }
+                        .table_describe(&table_id, &config)
+                        .await?
+                        .map_err(|e| VirtualServerError::Other(e.to_string()))?;
+
+                    self.view_descriptions.insert(view_id.clone(), description);
                 }
 
-                let resp = ViewExpressionSchemaResp { schema };
-                respond!(msg, ViewExpressionSchemaResp { ..resp })
+                let schema = self.view_descriptions[&view_id]
+                    .expression_schema
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), *ty as i32))
+                    .collect();
+
+                respond!(msg, ViewExpressionSchemaResp { schema })
             },
-            ViewColumnPathsReq(_) => {
-                respond!(msg, ViewColumnPathsResp {
-                    paths: self
-                        .handler
-                        .view_schema(
-                            msg.entity_id.as_str(),
-                            self.view_configs.get(&msg.entity_id).unwrap()
-                        )
-                        .await?
-                        .keys()
-                        .cloned()
-                        .collect()
-                })
+            ViewColumnPathsReq(view_column_paths_req) => {
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut paths: Vec<String> = self
+                    .handler
+                    .view_schema(msg.entity_id.as_str(), config)
+                    .await?
+                    .keys()
+                    .cloned()
+                    .collect();
+
+                if !config.split_by.is_empty() {
+                    sort_column_paths(&mut paths, config);
+                }
+
+                let start = view_column_paths_req.start_col.unwrap_or(0) as usize;
+                let end = view_column_paths_req
+                    .end_col
+                    .map_or(paths.len(), |x| x as usize);
+
+                let paths = paths.into_iter().take(end).skip(start).collect::<Vec<_>>();
+
+                respond!(msg, ViewColumnPathsResp { paths })
             },
             ViewToArrowReq(view_to_arrow_req) => {
                 let viewport = view_to_arrow_req.viewport.unwrap();
@@ -386,7 +429,10 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
                     .await?;
 
                 let json_string = cols
-                    .render_to_columns_json(RowPathStyle::Sidecar)
+                    .render_to_columns_json(
+                        RowPathStyle::Sidecar,
+                        view_to_columns_string_req.id.unwrap_or_default(),
+                    )
                     .map_err(|e| VirtualServerError::Other(e.to_string()))?;
 
                 respond!(msg, ViewToColumnsStringResp { json_string })
@@ -395,6 +441,7 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
                 self.handler.view_delete(msg.entity_id.as_str()).await?;
                 self.view_to_table.shift_remove(&msg.entity_id);
                 self.view_configs.shift_remove(&msg.entity_id);
+                self.view_descriptions.shift_remove(&msg.entity_id);
                 respond!(msg, ViewDeleteResp {})
             },
             MakeTableReq(req) => {
@@ -418,6 +465,15 @@ impl<T: VirtualServerHandler> VirtualServer<T> {
             // Stub implementations for callback/update requests that VirtualServer doesn't support
             TableOnDeleteReq(_) => {
                 respond!(msg, TableOnDeleteResp {})
+            },
+            ViewOnRemoveReq(_) => {
+                respond!(msg, ViewOnRemoveResp {
+                    indices: None,
+                    port_id: 0
+                })
+            },
+            ViewRemoveOnRemoveReq(_) => {
+                respond!(msg, ViewRemoveOnRemoveResp {})
             },
             ViewOnUpdateReq(_) => {
                 respond!(msg, ViewOnUpdateResp {

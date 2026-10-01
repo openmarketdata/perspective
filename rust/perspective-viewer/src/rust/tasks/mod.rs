@@ -21,30 +21,56 @@
 //! [`Renderer`]: crate::renderer::Renderer
 //! [`Presentation`]: crate::presentation::Presentation
 
+mod apply_global_filters;
+mod auto_pause;
 mod copy_export;
+mod create_panel;
 mod dismiss_render_warning;
 mod edit_expression;
+mod edit_window;
 mod eject;
-mod intersection_observer;
+mod pipeline;
+mod presize_panels;
 mod reset_all;
 mod resize_observer;
-mod restore_and_render;
+mod restore_panel;
 mod send_column_config;
 mod send_plugin_config;
-mod update_and_render;
+mod set_edit_mode;
+mod sync_update_panels;
+mod table_lifecycle;
+mod transactional_restore;
 mod update_theme;
 mod validate_expression;
 
+/// How long staged work (a hidden first draw, a presize sweep) may withhold
+/// a layout transition before it is released anyway — the progressive-reveal
+/// fallback for slow (e.g. remote) tables.
+pub(crate) const STAGING_DEADLINE_MS: i32 = 500;
+
+/// Fallback panel chrome `(width, height)` px (margin + border + titlebar)
+/// when no frame is available to measure live (see
+/// [`presize_panels::plugin_chrome`]).
+pub(crate) const CHROME_FALLBACK: (f64, f64) = (8.0, 33.0);
+
+pub use self::apply_global_filters::*;
+pub use self::auto_pause::*;
 pub use self::copy_export::*;
+pub(crate) use self::create_panel::*;
 pub use self::dismiss_render_warning::*;
 pub use self::edit_expression::*;
+pub use self::edit_window::*;
 pub use self::eject::*;
-pub use self::intersection_observer::*;
+pub use self::pipeline::*;
+pub use self::presize_panels::*;
 pub use self::reset_all::*;
 pub use self::resize_observer::*;
-pub use self::restore_and_render::*;
+pub(crate) use self::restore_panel::*;
 pub use self::send_column_config::*;
 pub use self::send_plugin_config::*;
-pub use self::update_and_render::*;
+pub use self::set_edit_mode::*;
+pub(crate) use self::sync_update_panels::*;
+pub(crate) use self::table_lifecycle::*;
+pub(crate) use self::transactional_restore::{commit_and_render_locked, prepare};
 pub use self::update_theme::*;
 pub use self::validate_expression::*;

@@ -8,20 +8,24 @@
  * ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
  * ┃ This file is part of the Perspective library, distributed under the terms ┃
  * ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
- * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ */
+ * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ */
 
 @import "./defaults.css";
 
 /* Register theme for auto-detection */
 perspective-viewer,
-perspective-viewer[theme="Botanical"] {
+perspective-viewer[theme="Botanical"],
+perspective-viewer [theme="Botanical"] {
     --psp-theme-name: "Botanical";
 }
 
-perspective-viewer[theme="Botanical"] {
+perspective-viewer[theme="Botanical"],
+perspective-viewer [theme="Botanical"] {
     /* perspective-viewer-botanical--colors */
     background-color: #1a2e1a;
     color: #e0ead8;
+    color-scheme: dark;
     --psp--color: #e0ead8;
     --psp-active--color: #5a9e4b;
     --psp-error--color: #e8836a;
@@ -33,16 +37,9 @@ perspective-viewer[theme="Botanical"] {
     --psp-expression--function--color: #7bc96f;
     --psp-expression--psp-error--color: rgb(232, 131, 106);
     --psp-calendar--filter: invert(1);
+    --psp-input--filter: invert(1);
     --psp-warning--color: #1a2e1a;
     --psp-warning--background: var(--psp--color);
-
-    --psp-icon--select-arrow--mask-image: var(
-        --psp-icon--select-arrow-light--mask-image
-    );
-
-    --psp-icon--select-arrow-hover--mask-image: var(
-        --psp-icon--select-arrow-dark--mask-image
-    );
 
     /* Syntax */
     --psp-code-editor--symbol--color: #e0ead8;
@@ -78,6 +75,16 @@ perspective-viewer[theme="Botanical"] {
     --psp-charts--series-8--color: rgb(210, 140, 80);
     --psp-charts--series-9--color: rgb(130, 120, 190);
     --psp-charts--series-10--color: rgb(170, 200, 110);
+    --psp-datagrid--series-1--color: rgb(90, 158, 75);
+    --psp-datagrid--series-2--color: rgb(206, 176, 104);
+    --psp-datagrid--series-3--color: rgb(160, 110, 180);
+    --psp-datagrid--series-4--color: rgb(80, 170, 150);
+    --psp-datagrid--series-5--color: rgb(140, 170, 90);
+    --psp-datagrid--series-6--color: rgb(200, 120, 140);
+    --psp-datagrid--series-7--color: rgb(100, 150, 190);
+    --psp-datagrid--series-8--color: rgb(210, 140, 80);
+    --psp-datagrid--series-9--color: rgb(130, 120, 190);
+    --psp-datagrid--series-10--color: rgb(170, 200, 110);
 
     --psp-charts--gradient--background: linear-gradient(
         #e8836a 0%,
@@ -87,45 +94,4 @@ perspective-viewer[theme="Botanical"] {
 
     --psp-charts--map-tiles--url: "http://{a-c}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png";
     --psp-charts--map-tiles--attribution-: "I <3 Open Source";
-}
-
-perspective-copy-menu[theme="Botanical"],
-perspective-export-menu[theme="Botanical"],
-perspective-dropdown[theme="Botanical"],
-perspective-date-column-style[theme="Botanical"],
-perspective-datetime-column-style[theme="Botanical"],
-perspective-number-column-style[theme="Botanical"],
-perspective-string-column-style[theme="Botanical"] {
-    /* perspective-viewer-botanical--colors */
-    background-color: #1a2e1a;
-    color: #e0ead8;
-    --psp--color: #e0ead8;
-    --psp-active--color: #5a9e4b;
-    --psp-error--color: #e8836a;
-    --psp-inactive--color: #526b4a;
-    --psp-inactive--border-color: #3d5c3d;
-    --psp--background-color: #1a2e1a;
-    --psp-active--background: rgba(90, 158, 75, 0.5);
-    --psp-expression--operator--color: #b8c9ad;
-    --psp-expression--function--color: #7bc96f;
-    --psp-expression--psp-error--color: rgb(232, 131, 106);
-    --psp-calendar--filter: invert(1);
-    --psp-warning--color: #1a2e1a;
-    --psp-warning--background: var(--psp--color);
-
-    --psp-icon--select-arrow--mask-image: var(
-        --psp-icon--select-arrow-light--mask-image
-    );
-
-    --psp-icon--select-arrow-hover--mask-image: var(
-        --psp-icon--select-arrow-dark--mask-image
-    );
-
-    --psp-code-editor--symbol--color: #e0ead8;
-    --psp-code-editor--literal--color: #a8d8a0;
-    --psp-code-editor--operator--color: rgb(206, 176, 104);
-    --psp-code-editor--comment--color: rgb(120, 160, 100);
-    --psp-code-editor--column--color: #c9a0d8;
-
-    border: 1px solid #3d5c3d;
 }

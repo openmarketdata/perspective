@@ -41,9 +41,11 @@ use std::fmt;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::config::{FilterTerm, GroupRollupMode, Scalar, Sort, SortDir, ViewConfig};
+use crate::config::{
+    FilterTerm, GroupRollupMode, Scalar, Sort, SortDir, SplitRollupMode, ViewConfig,
+};
 use crate::proto::{ColumnType, ViewPort};
-use crate::virtual_server::generic_sql_model::table_make_view::ViewQueryContext;
+use crate::virtual_server::generic_sql_model::table_make_view::{ViewQueryContext, quote_ident};
 
 /// Error type for SQL generation operations.
 #[derive(Debug, Clone)]
@@ -74,7 +76,102 @@ pub type GenericSQLResult<T> = Result<T, GenericSQLError>;
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct GenericSQLVirtualServerModelArgs {
     create_entity: Option<String>,
+
+    /// Entity keyword for `view_delete`'s `DROP {drop_entity} IF EXISTS`.
+    /// Must agree with `create_entity` — Postgres rejects `DROP TABLE` on a
+    /// view (`"VIEW"`), while DuckDB's temp tables take the default
+    /// (`"TABLE"`).
+    drop_entity: Option<String>,
+
     grouping_fn: Option<String>,
+
+    /// Expression for the dialect's natural row identity, used for unsorted
+    /// view order and natural-order window frames — `rowid` (DuckDB, the
+    /// default) or `ctid` (Postgres). Dialects with no such pseudo-column
+    /// (ClickHouse) should advertise `unordered` instead.
+    row_id_expr: Option<String>,
+
+    /// Separator joining `split_by` values and the column name in pivoted
+    /// view column names, e.g. `"CA|Sales"` for separator `"|"`. Perspective's
+    /// column-path separator is `"|"`, so any other value produces views the
+    /// client will not interpret as column paths.
+    column_separator: Option<String>,
+
+    /// Escape character emitted as an `ESCAPE` clause after generated
+    /// `ILIKE` patterns (Perspective's `begins with` / `contains` /
+    /// `ends with` filter ops and their negations). Dialects with no
+    /// default `LIKE` escape character (DuckDB) must pass `"\\"`; dialects
+    /// where backslash escaping is implicit and the `ESCAPE` clause is
+    /// unsupported (ClickHouse) must omit it.
+    like_escape_clause: Option<String>,
+
+    /// Whether the dialect's string literal parser consumes C-style
+    /// backslash escapes (ClickHouse), requiring backslashes in emitted
+    /// literals to be doubled. Dialects with standard-conforming literals
+    /// (DuckDB) omit it.
+    backslash_escaped_literals: Option<bool>,
+
+    /// Name of the dialect's partial-match regex function, emitted as
+    /// `{regex_fn}("col", 'pattern')` for the `matches` / `not matches`
+    /// filter ops — `"regexp_matches"` for DuckDB, `"match"` for
+    /// ClickHouse (both RE2, matching the engine's semantics). When
+    /// omitted, regex filter clauses are dropped.
+    regex_fn: Option<String>,
+
+    /// Template wrapping a `SELECT` so the dialect PLANS it and reports its
+    /// result columns without executing it; `{}` is the query.
+    describe_template: Option<String>,
+}
+
+/// Recovers the source column of a pivoted view column name — the longest
+/// `config.columns` entry that is a strict suffix of `name` — with its index
+/// in `config.columns`. Requires no separator knowledge, so it works at
+/// protocol boundaries where the SQL model's `column_separator` is unknown.
+/// Returns `None` for non-path names (e.g. flat-view columns, which equal a
+/// `config.columns` entry exactly rather than strictly containing one).
+pub(crate) fn column_path_source<'a>(
+    name: &str,
+    config: &'a ViewConfig,
+) -> Option<(usize, &'a str)> {
+    if config.split_by.is_empty() {
+        return None;
+    }
+
+    let rollup = config.split_rollup_mode == SplitRollupMode::Rollup;
+
+    let mut best: Option<(usize, &'a str)> = None;
+    for (idx, col) in config.columns.iter().flatten().enumerate() {
+        if (name.len() > col.len() || rollup)
+            && name.ends_with(col.as_str())
+            && best.is_none_or(|(_, b)| col.len() > b.len())
+        {
+            best = Some((idx, col));
+        }
+    }
+
+    best
+}
+
+/// Sorts pivoted view column names into Perspective's column-path order:
+/// `split_by` value paths ascending, then `config.columns` order within each
+/// path (e.g. `CA|price, CA|qty, NY|price, NY|qty`).
+///
+/// The per-column `PIVOT` join in [`ViewQueryContext`] emits columns grouped
+/// by source column instead, so every egress of view column names re-sorts
+/// with this. Internal `__`-prefixed columns sort first, unmatched names
+/// last, both preserving relative order.
+pub(crate) fn sort_column_paths<T: AsRef<str>>(names: &mut [T], config: &ViewConfig) {
+    names.sort_by_cached_key(|name| {
+        let name = name.as_ref();
+        if name.starts_with("__") {
+            return (0u8, String::new(), 0usize);
+        }
+
+        match column_path_source(name, config) {
+            Some((idx, col)) => (1, name[..name.len() - col.len()].to_string(), idx),
+            None => (2, String::new(), 0),
+        }
+    });
 }
 
 /// A stateless SQL query builder virtual server operations.
@@ -131,23 +228,88 @@ impl GenericSQLVirtualServerModel {
         Ok(format!("SELECT COUNT(*) FROM (DESCRIBE {})", view_id))
     }
 
-    /// Returns the SQL query to validate an expression against a table.
+    fn describe_wrap(&self, query: &str) -> String {
+        self.0
+            .describe_template
+            .as_deref()
+            .unwrap_or("DESCRIBE ({})")
+            .replacen("{}", query, 1)
+    }
+
+    /// Returns the SQL query that plans every expression of `config` at once
+    /// against `table_id`.
     ///
-    /// # Arguments
-    /// * `table_id` - The identifier of the table.
-    /// * `expression` - The SQL expression to validate.
+    /// # Returns
+    /// SQL: `DESCRIBE (SELECT {expr} AS "{alias}", ... FROM {table_id})`
+    pub fn expressions_describe(
+        &self,
+        table_id: &str,
+        config: &ViewConfig,
+    ) -> GenericSQLResult<Option<String>> {
+        if config.expressions.is_empty() {
+            return Ok(None);
+        }
+
+        let mut names = config.expressions.keys().collect::<Vec<_>>();
+        names.sort();
+        let selects = names
+            .iter()
+            .map(|name| {
+                format!(
+                    "{} AS \"{}\"",
+                    config.expressions.0[*name],
+                    quote_ident(name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Ok(Some(self.describe_wrap(&format!(
+            "SELECT {} FROM {}",
+            selects, table_id
+        ))))
+    }
+
+    /// Returns the SQL query that plans one expression against a table.
     ///
     /// # Returns
     /// SQL: `DESCRIBE (SELECT {expression} FROM {table_id})`
-    pub fn table_validate_expression(
+    pub fn expression_describe(
         &self,
         table_id: &str,
         expression: &str,
     ) -> GenericSQLResult<String> {
-        Ok(format!(
-            "DESCRIBE (SELECT {} FROM {})",
-            expression, table_id
-        ))
+        Ok(self.describe_wrap(&format!("SELECT {} FROM {}", expression, table_id)))
+    }
+
+    /// Returns the SQL query that plans the view `config` would build against
+    /// `table_id`, without materializing it.
+    ///
+    /// # Returns
+    /// SQL: `DESCRIBE (SELECT ... GROUP BY ...)`
+    pub fn table_describe(
+        &self,
+        table_id: &str,
+        config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+    ) -> GenericSQLResult<Option<String>> {
+        if config.columns.iter().flatten().next().is_none() {
+            return Ok(None);
+        }
+
+        let mut folded = config.clone();
+        folded.sort.clear();
+        let split_by = std::mem::take(&mut folded.split_by);
+        if !split_by.is_empty() && folded.group_rollup_mode != GroupRollupMode::Total {
+            if folded.group_by.is_empty() {
+                folded.aggregates.clear();
+            }
+
+            folded.group_by.extend(split_by);
+        }
+
+        let ctx = ViewQueryContext::new(self, table_id, &folded, schema)?;
+        Ok(Some(self.describe_wrap(&ctx.build_query())))
     }
 
     /// Returns the SQL query to delete a view.
@@ -156,9 +318,10 @@ impl GenericSQLVirtualServerModel {
     /// * `view_id` - The identifier of the view to delete.
     ///
     /// # Returns
-    /// SQL: `DROP TABLE IF EXISTS {view_id}`
+    /// SQL: `DROP {drop_entity} IF EXISTS {view_id}`
     pub fn view_delete(&self, view_id: &str) -> GenericSQLResult<String> {
-        Ok(format!("DROP TABLE IF EXISTS {}", view_id))
+        let entity = self.0.drop_entity.as_deref().unwrap_or("TABLE");
+        Ok(format!("DROP {} IF EXISTS {}", entity, view_id))
     }
 
     /// Returns the SQL query to create a view from a table with the given
@@ -169,6 +332,7 @@ impl GenericSQLVirtualServerModel {
     /// * `view_id` - The identifier for the new view.
     /// * `config` - The view configuration specifying columns, group_by,
     ///   split_by, etc.
+    /// * `schema` - The schema of the source table (column names to types).
     ///
     /// # Returns
     /// SQL: `CREATE TABLE {view_id} AS (...)`
@@ -177,8 +341,9 @@ impl GenericSQLVirtualServerModel {
         table_id: &str,
         view_id: &str,
         config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
     ) -> GenericSQLResult<String> {
-        let ctx = ViewQueryContext::new(self, table_id, config);
+        let ctx = ViewQueryContext::new(self, table_id, config, schema)?;
         let query = ctx.build_query();
         let template = self.0.create_entity.as_deref().unwrap_or("TABLE");
         Ok(format!("CREATE {} {} AS ({})", template, view_id, query))
@@ -230,6 +395,8 @@ impl GenericSQLVirtualServerModel {
             } else {
                 data_columns.sort_by(|a, b| b.cmp(a));
             }
+        } else if !config.split_by.is_empty() {
+            sort_column_paths(&mut data_columns, config);
         }
 
         let data_columns: Vec<&String> = data_columns
@@ -250,7 +417,11 @@ impl GenericSQLVirtualServerModel {
 
         let all_columns: Vec<String> = group_by_cols
             .into_iter()
-            .chain(data_columns.iter().map(|col| format!("\"{}\"", col)))
+            .chain(
+                data_columns
+                    .iter()
+                    .map(|col| format!("\"{}\"", quote_ident(col))),
+            )
             .collect();
 
         Ok(format!(
@@ -305,22 +476,26 @@ impl GenericSQLVirtualServerModel {
         let has_grouping_id =
             !config.group_by.is_empty() && config.group_rollup_mode != GroupRollupMode::Flat;
         let where_clause = if has_grouping_id {
-            " WHERE __GROUPING_ID__ = 0"
+            " WHERE \"__GROUPING_ID__\" = 0"
         } else {
             ""
         };
 
+        let column_name = quote_ident(column_name);
         Ok(format!(
             "SELECT MIN(\"{}\"), MAX(\"{}\") FROM {}{}",
             column_name, column_name, view_id, where_clause
         ))
     }
 
-    fn filter_term_to_sql(term: &FilterTerm) -> Option<String> {
+    fn filter_term_to_sql(term: &FilterTerm, backslash_escaped: bool) -> Option<String> {
         match term {
-            FilterTerm::Scalar(scalar) => Self::scalar_to_sql(scalar),
+            FilterTerm::Scalar(scalar) => Self::scalar_to_sql(scalar, backslash_escaped),
             FilterTerm::Array(scalars) => {
-                let values: Vec<String> = scalars.iter().filter_map(Self::scalar_to_sql).collect();
+                let values: Vec<String> = scalars
+                    .iter()
+                    .filter_map(|x| Self::scalar_to_sql(x, backslash_escaped))
+                    .collect();
                 if values.is_empty() {
                     None
                 } else {
@@ -330,12 +505,12 @@ impl GenericSQLVirtualServerModel {
         }
     }
 
-    fn scalar_to_sql(scalar: &Scalar) -> Option<String> {
+    fn scalar_to_sql(scalar: &Scalar, backslash_escaped: bool) -> Option<String> {
         match scalar {
             Scalar::Null => None,
             Scalar::Bool(b) => Some(if *b { "TRUE" } else { "FALSE" }.to_string()),
             Scalar::Float(f) => Some(f.to_string()),
-            Scalar::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
+            Scalar::String(s) => Some(table_make_view::string_literal(s, backslash_escaped)),
         }
     }
 }

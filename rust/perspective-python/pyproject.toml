@@ -11,17 +11,42 @@
 #  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 [build-system]
-requires = ["maturin>=1.4,<2.0"]
+requires = ["maturin>=1.13.3,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "perspective-python"
+description = "Interactive data grid, pivot table and charts for large, real-time and streaming datasets, with a Jupyter widget and WebSocket server."
+readme = "README.md"
+keywords = [
+    "datagrid",
+    "pivot",
+    "visualization",
+    "analytics",
+    "dashboard",
+    "jupyter",
+    "anywidget",
+    "streaming",
+    "real-time",
+    "arrow",
+    "pandas",
+    "polars",
+    "duckdb",
+    "webassembly",
+]
 requires-python = ">=3.9"
 dynamic = ["version"]
 dependencies = []
-license = { file = "LICENSE.md" }
+license = "Apache-2.0"
+license-files = ["LICENSE*"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Office/Business :: Financial",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3",
@@ -29,6 +54,9 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: Jupyter",
     "Framework :: Jupyter :: JupyterLab",
     "Framework :: Jupyter :: JupyterLab :: 3",
     "Framework :: Jupyter :: JupyterLab :: Extensions",
@@ -36,19 +64,28 @@ classifiers = [
     "Framework :: Jupyter :: JupyterLab :: Extensions :: Prebuilt",
 ]
 
+[project.urls]
+Homepage = "https://perspective-dev.github.io"
+Documentation = "https://perspective-dev.github.io/guide/"
+Repository = "https://github.com/perspective-dev/perspective"
+Issues = "https://github.com/perspective-dev/perspective/issues"
+Changelog = "https://github.com/perspective-dev/perspective/blob/master/CHANGELOG.md"
+
 [project.optional-dependencies]
-jupyter = ["ipywidgets>=7.5.1,<9"]
+jupyter = ["anywidget>=0.9"]
 tornado = ["tornado>=5,<7"]
 aiohttp = ["aiohttp>=2,<4"]
 starlette = ["starlette<1"]
 
 [tool.maturin]
 module-name = "perspective"
-data = "perspective_python-4.5.1.data"
+data = "perspective_python-5.5.1.data"
 features = ["pyo3/extension-module"]
 include = [
     { path = "perspective/*libpsp.so", format = "wheel" },
     { path = "perspective/*libpsp.dll", format = "wheel" },
+    { path = "perspective/widget/static/perspective-anywidget.js", format = "wheel" },
+    { path = "perspective/widget/static/perspective-anywidget.css", format = "wheel" },
 ]
 
 [tool.pytest.ini_options]

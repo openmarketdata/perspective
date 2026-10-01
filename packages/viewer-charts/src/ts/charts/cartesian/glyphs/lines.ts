@@ -19,7 +19,8 @@ import {
     getInstancing,
 } from "../../../webgl/instanced-attrs";
 import { compileProgram } from "../../../webgl/program-cache";
-import { formatTickValue, formatDateTickValue } from "../../../layout/ticks";
+import { colorRangePivot } from "../../../theme/gradient";
+import { buildPointRowTooltipLines } from "../tooltip-lines";
 import lineVert from "../../../shaders/line.vert.glsl";
 import lineFrag from "../../../shaders/line.frag.glsl";
 
@@ -121,45 +122,15 @@ export class LineGlyph implements Glyph {
 
     //  helpers
 
-    async buildTooltipLines(
+    buildTooltipLines(
         chart: CartesianChart,
         flatIdx: number,
-    ): Promise<string[]> {
-        const lines: string[] = [];
-        if (!chart._xData || !chart._yData) {
-            return lines;
-        }
-
-        if (chart._splitGroups.length > 0 && chart._seriesCapacity > 0) {
-            const seriesIdx = Math.floor(flatIdx / chart._seriesCapacity);
-            const sg = chart._splitGroups[seriesIdx];
-            if (sg) {
-                lines.push(sg.prefix);
-            }
-        }
-
-        const xVal = chart._xData[flatIdx];
-        const yVal = chart._yData[flatIdx];
-
-        const xType = chart._columnTypes[chart._xLabel] || "";
-        const xIsDate = xType === "date" || xType === "datetime";
-        const xFormatted = xIsDate
-            ? formatDateTickValue(xVal)
-            : formatTickValue(xVal);
-        lines.push(`${chart._xLabel || "Row"}: ${xFormatted}`);
-
-        const yType = chart._columnTypes[chart._yLabel] || "";
-        const yIsDate = yType === "date" || yType === "datetime";
-        const yFormatted = yIsDate
-            ? formatDateTickValue(yVal)
-            : formatTickValue(yVal);
-        lines.push(`${chart._yLabel}: ${yFormatted}`);
-
-        return lines;
+    ): Promise<string[][]> {
+        return buildPointRowTooltipLines(chart, flatIdx);
     }
 
     tooltipOptions() {
-        return { crosshair: true, highlightRadius: 5 };
+        return { crosshair: true, highlightRadius: 5, axisIndicators: true };
     }
 
     destroy(chart: CartesianChart): void {
@@ -195,10 +166,13 @@ function bindLineState(
     gl.uniformMatrix4fv(cache.u_projection, false, projection);
     gl.uniform2f(cache.u_resolution, gl.canvas.width, gl.canvas.height);
     gl.uniform1f(cache.u_line_width, chart._pluginConfig.line_width_px * dpr);
-    if (chart._colorMin < chart._colorMax) {
-        gl.uniform2f(cache.u_color_range, chart._colorMin, chart._colorMax);
-    } else {
+    if (chart._colorMin >= chart._colorMax) {
         gl.uniform2f(cache.u_color_range, 0.0, 0.0);
+    } else if (chart._colorName && !chart._colorIsString) {
+        const [lo, hi] = colorRangePivot(chart._colorMin, chart._colorMax);
+        gl.uniform2f(cache.u_color_range, lo, hi);
+    } else {
+        gl.uniform2f(cache.u_color_range, chart._colorMin, chart._colorMax);
     }
 
     bindGradientTexture(

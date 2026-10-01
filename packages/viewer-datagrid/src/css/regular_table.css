@@ -83,6 +83,20 @@ perspective-viewer,
             inset 2px 0px 0px var(--psp--color),
             inset 0px -2px 0px var(--psp--color);
     }
+
+    regular-table table tbody td,
+    regular-table table tbody th,
+    regular-table table thead th {
+        line-height: min(
+            1.2em,
+            calc(var(--psp-datagrid--row--height, 23px) - 5px)
+        );
+        overflow: hidden;
+    }
+
+    regular-table table tbody td {
+        padding: 2px 5px;
+    }
 }
 
 perspective-viewer,
@@ -131,6 +145,11 @@ perspective-viewer.dragging,
 .psp-header-border:last-child {
     border-right-width: 0px;
 }
+
+/* Subtotal / grand-total column groups (`split_rollup_mode: "rollup"`)
+   carry `psp-split-total` / `psp-split-subtotal` marker classes for themes;
+   no default styling - group boundaries come from the mitered border
+   system. */
 
 .psp-header-sort-desc:after {
     background-repeat: no-repeat;
@@ -286,7 +305,7 @@ tbody th:last-of-type {
     text-overflow: ellipsis;
 }
 
-tbody th:empty {
+tbody th.psp-tree-spacer {
     background-image: linear-gradient(
         to right,
         transparent 9px,
@@ -338,67 +357,44 @@ regular-table:not(.flat-group-rollup-mode) {
     text-align: right;
 }
 
-.psp-color-mode-bar {
+.psp-color-mode-bar,
+.psp-color-mode-label-bar {
     padding: 0 2px;
+    background-image: var(--psp-label-bar-color);
+    background-repeat: no-repeat;
+    background-origin: padding-box;
+    background-size: var(--psp-bar-size, 0%) 80%;
+    background-position-x: var(--psp-bar-anchor, 0%);
+    background-position-y: center;
 }
 
 .psp-color-mode-label-bar {
     position: relative;
-    padding: 0 2px;
-
-    .psp-bar {
-        isolation: isolate;
-        position: unset;
-    }
-
-    .psp-bar:before {
-        color: transparent;
-        pointer-events: none;
-        content: var(--label);
-        display: inline-flex;
-        justify-content: flex-end;
-        align-items: center;
-        padding: 0 3px;
-    }
-
-    .psp-bar:after {
-        color: var(--psp-label-bar-bg);
-        content: var(--label);
-        mix-blend-mode: difference;
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        display: inline-flex;
-        justify-content: flex-end;
-        align-items: center;
-        padding: 0 5px;
-    }
+    isolation: isolate;
 }
 
-.psp-label-bar {
-    inset: 0;
-    pointer-events: none;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 0px;
+.psp-color-mode-label-bar:before {
+    color: transparent;
+    content: attr(data-psp-label);
+    display: block;
+    height: 0;
+    white-space: nowrap;
+    padding: 0 5px;
 }
 
-.psp-label-bar-fill {
-    position: absolute;
-    top: 10%;
-    height: 80%;
-    background: var(--psp-label-bar-color);
-    pointer-events: none;
-}
-
-.psp-label-bar-text {
-    position: relative;
+.psp-color-mode-label-bar:after {
     color: var(--psp-label-bar-bg);
+    content: attr(data-psp-label);
     mix-blend-mode: difference;
-    pointer-events: none;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: inline-flex;
+    justify-content: var(--psp-label-justify, flex-end);
+    align-items: var(--psp-label-align, center);
+    padding: 0 5px;
 }
 
 .psp-align-left {
@@ -413,19 +409,32 @@ regular-table:not(.flat-group-rollup-mode) {
     color: var(--psp-datagrid--neg-cell--color);
 }
 
-regular-table table tbody td {
-    min-width: 52px !important;
+:host-context(perspective-viewer.shift-active)
+    .psp-is-width-override
+    .rt-column-resize {
+    border: 1px dashed
+        var(
+            --shift-active--color,
+            var(--psp-datagrid--pos-cell--color, #1078d1)
+        );
+
+    border-bottom-width: 0px;
+    border-left-width: 0px;
 }
 
 .psp-is-width-override .rt-column-resize,
 .rt-column-resize:hover {
-    border: 1px dashed #999;
+    border: 1px dashed var(--psp--color);
     border-bottom-width: 0px;
     border-left-width: 0px;
 }
 
 .boolean-editable {
     cursor: pointer;
+}
+
+regular-table table tbody td.psp-editable {
+    user-select: text;
 }
 
 regular-table table {
@@ -467,7 +476,7 @@ regular-table table {
         border-top-width: 1px;
     }
 
-    tbody th:empty {
+    tbody th.psp-tree-spacer {
         background-position: 0px -10px;
     }
 
@@ -514,11 +523,15 @@ regular-table tbody tr:hover {
 /* until the drawing is done. However, this causes the datagrid to draw its */
 /* _first_ frame as if its in the wrong state, as it detects sidepanel state */
 /* via HTML attribute checking. */
-regular-table
+:host(.active)
+    regular-table
     #psp-column-edit-buttons
     th:not(.rt-group-corner)
     span:not(.rt-column-resize):before {
-    content: var(--psp-datagrid--column-edit-button--content, "Edit");
+    content: var(
+        --psp-datagrid--column-edit-button--content,
+        var(--psp-missing)
+    );
 }
 
 perspective-viewer:not([settings]),
@@ -550,6 +563,26 @@ regular-table table tbody tr:after {
 
 regular-table table tbody tr:not(:first-child):after {
     border-top: 1px solid var(--psp-inactive--border-color);
+}
+
+regular-table table tbody td .psp-wrap {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: var(--psp-datagrid--wrap-lines, 1);
+    line-height: 1.2;
+    max-height: calc(var(--psp-datagrid--row--height, 23px) - 5px);
+    overflow: hidden;
+    white-space: normal;
+    overflow-wrap: break-word;
+}
+
+regular-table table tbody tr.psp-zebra td,
+regular-table table tbody tr.psp-zebra th:not(.psp-tree-spacer),
+regular-table table tbody tr.psp-zebra:after {
+    background-color: var(
+        --psp-datagrid--zebra--color,
+        color-mix(in srgb, var(--psp--color, #000000) 6%, transparent)
+    );
 }
 
 regular-table table tbody tr:hover:not(:first-child):after {

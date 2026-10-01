@@ -1,0 +1,154 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+//! Value-semantic snapshot plumbing: the mechanical `Update*` handlers that
+//! copy fresh engine-state snapshots (dispatched by the [`super::wiring`]
+//! subscriptions/callbacks) into the root's props fields, re-rendering only
+//! on an actual change.
+
+use futures::channel::oneshot::channel;
+use perspective_js::utils::ApiFuture;
+use yew::prelude::*;
+
+use super::PerspectiveViewer;
+use crate::presentation::{DragDropProps, PresentationProps};
+use crate::renderer::RendererProps;
+use crate::session::{SessionProps, TableLoadState};
+use crate::tasks::resize_visible_panels;
+
+impl PerspectiveViewer {
+    pub(super) fn refresh_session_snapshot(&mut self, ctx: &Context<Self>) {
+        let props = self.active_session.to_props();
+        if props != self.session_props {
+            self.on_update_session(ctx, props);
+        }
+    }
+
+    pub(super) fn on_update_session(&mut self, ctx: &Context<Self>, props: SessionProps) -> bool {
+        let changed = props != self.session_props;
+        let was_mounted =
+            self.is_column_settings_mounted(&self.presentation_props.open_column_settings);
+        self.session_props = props;
+        let now_mounted =
+            self.is_column_settings_mounted(&self.presentation_props.open_column_settings);
+        if self.settings_geometry.column_settings_pinned
+            && was_mounted != now_mounted
+            && !self.settings_geometry.column_settings_commit_pending
+        {
+            let (notify, rendered) = channel::<()>();
+            self.on_rendered.push(notify);
+            let workspace = ctx.props().workspace.clone();
+            ApiFuture::spawn(async move {
+                rendered.await?;
+                resize_visible_panels(&workspace).await;
+                Ok(())
+            });
+        }
+
+        changed
+    }
+
+    pub(super) fn on_update_session_stats(
+        &mut self,
+        has_table_cells: bool,
+        has_table: Option<TableLoadState>,
+    ) -> bool {
+        let changed = has_table_cells != self.session_props.has_table_cells
+            || has_table != self.session_props.has_table;
+        self.session_props.has_table_cells = has_table_cells;
+        self.session_props.has_table = has_table;
+        changed
+    }
+
+    pub(super) fn on_update_renderer(&mut self, props: RendererProps) -> bool {
+        let changed = props != self.renderer_props;
+        self.renderer_props = props;
+        changed
+    }
+
+    pub(super) fn on_update_presentation(
+        &mut self,
+        ctx: &Context<Self>,
+        props: PresentationProps,
+    ) -> bool {
+        // Boot fill-in: theme discovery resolving turns an empty registry
+        // into a real one, and any panel created before that has no theme to
+        // stamp. Give those — and ONLY those — the new default, then restyle
+        // the ones whose captured `--psp-*` CSS is now stale
+        // (`Renderer::needs_restyle`; plugins re-read CSS only at
+        // `restyle()`/first-draw, so a plain redraw would not repaint them).
+        //
+        // A panel that already has a theme is never touched here: `theme` is
+        // concrete state, so re-ordering the registry — or any other
+        // `resetThemes` that leaves a panel's theme available — must repaint
+        // nothing.
+        let old_default = self.presentation_props.available_themes.first().cloned();
+        let new_default = props.available_themes.first().cloned();
+        if old_default != new_default {
+            for panel in ctx
+                .props()
+                .workspace
+                .panel_ids()
+                .into_iter()
+                .filter_map(|id| ctx.props().workspace.panel(&id))
+            {
+                if panel.renderer.theme().is_some() {
+                    continue;
+                }
+
+                panel.renderer.set_theme(new_default.clone());
+                if panel.renderer.needs_restyle() {
+                    let renderer = panel.renderer.clone();
+                    crate::utils::spawn_owned("default-theme-restyle", async move {
+                        renderer.restyle_all().await?;
+                        Ok(())
+                    });
+                }
+            }
+        }
+
+        let changed = props != self.presentation_props;
+        self.presentation_props = props;
+        changed
+    }
+
+    pub(super) fn on_update_settings_open(&mut self, open: bool) -> bool {
+        let changed = open != self.presentation_props.is_settings_open;
+        self.presentation_props.is_settings_open = open;
+        changed
+    }
+
+    pub(super) fn on_update_is_workspace(&mut self, is_workspace: bool) -> bool {
+        let changed = is_workspace != self.presentation_props.is_workspace;
+        self.presentation_props.is_workspace = is_workspace;
+        changed
+    }
+
+    pub(super) fn on_update_dragdrop(&mut self, props: DragDropProps) -> bool {
+        let changed = props != self.dragdrop_props;
+        self.dragdrop_props = props;
+        changed
+    }
+
+    pub(super) fn on_update_global_filters(&mut self, ctx: &Context<Self>) -> bool {
+        let filters = ctx.props().workspace.global_filters();
+        let changed = filters != self.global_filters;
+        self.global_filters = filters;
+        changed
+    }
+
+    pub(super) fn on_update_in_flight(&mut self, count: u32) -> bool {
+        let changed = count != self.update_count;
+        self.update_count = count;
+        changed
+    }
+}

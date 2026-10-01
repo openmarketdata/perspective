@@ -14,7 +14,6 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use perspective_client::config::{ViewConfig, *};
-use perspective_js::utils::ApiFuture;
 use yew::prelude::*;
 
 use super::InPlaceColumn;
@@ -22,15 +21,15 @@ use super::filter_column::*;
 use super::pivot_column::*;
 use super::sort_column::*;
 use crate::components::column_dropdown::{ColumnDropDownElement, ColumnDropDownPortal};
-use crate::components::containers::dragdrop_list::*;
-use crate::components::containers::select::{Select, SelectItem};
+use crate::components::dragdrop_list::*;
 use crate::components::filter_dropdown::{FilterDropDownElement, FilterDropDownPortal};
-use crate::components::style::LocalStyle;
-use crate::css;
+use crate::config::PluginStaticConfig;
 use crate::presentation::Presentation;
 use crate::renderer::*;
 use crate::session::drag_drop_update::*;
 use crate::session::*;
+use crate::tasks::apply_and_render;
+use crate::ui::{Select, SelectItem};
 use crate::utils::*;
 
 #[derive(Clone, Properties)]
@@ -50,6 +49,14 @@ pub struct ConfigSelectorProps {
     /// Session metadata snapshot — threaded from `SessionProps`.
     pub metadata: SessionMetadataRc,
 
+    /// The ACTIVE plugin's declared contract, threaded as a VALUE prop.
+    /// Read from `renderer.metadata()` during render instead, the pivot
+    /// labels went stale: `renderer` is deliberately excluded from prop
+    /// equality, so switching Y Line back to Datagrid — same view config,
+    /// same named-slot count — re-rendered nothing and left the previous
+    /// plugin's role labels on screen until the panel was reopened.
+    pub plugin_static_config: Rc<PluginStaticConfig>,
+
     /// Selected theme name, threaded for PortalModal consumers.
     pub selected_theme: Option<String>,
 
@@ -65,6 +72,7 @@ impl PartialEq for ConfigSelectorProps {
             && self.drag_column == other.drag_column
             && self.metadata == other.metadata
             && self.selected_theme == other.selected_theme
+            && self.plugin_static_config == other.plugin_static_config
     }
 }
 
@@ -78,6 +86,7 @@ pub enum ConfigSelectorMsg {
     TransposePivots,
     New(DragTarget, InPlaceColumn),
     UpdateGroupRollupMode(GroupRollupMode),
+    UpdateSplitRollupMode(SplitRollupMode),
 }
 
 #[derive(Clone)]
@@ -134,11 +143,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(config).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, config) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -154,11 +160,24 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(config).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, config) {
+                        spawn_owned("config-selector", task);
+                    }
+                }
+
+                false
+            },
+            ConfigSelectorMsg::UpdateSplitRollupMode(mode) => {
+                let config = ViewConfigUpdate {
+                    split_rollup_mode: Some(mode),
+                    ..ViewConfigUpdate::default()
+                };
+
+                {
+                    let session = ctx.props().session.clone();
+                    let renderer = ctx.props().renderer.clone();
+                    if let Ok(task) = apply_and_render(&session, &renderer, config) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -193,11 +212,8 @@ impl Component for ConfigSelector {
                     {
                         let session = ctx.props().session.clone();
                         let renderer = ctx.props().renderer.clone();
-                        if session.update_view_config(config).is_ok() {
-                            ApiFuture::spawn(async move {
-                                renderer.apply_pending_plugin()?;
-                                renderer.draw(session.validate().await?.create_view()).await
-                            });
+                        if let Ok(task) = apply_and_render(&session, &renderer, config) {
+                            spawn_owned("config-selector", task);
                         }
                     }
 
@@ -216,11 +232,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(config).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, config) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -239,11 +252,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(config).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, config) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -252,7 +262,7 @@ impl Component for ConfigSelector {
             },
             ConfigSelectorMsg::Close(..) => false,
             ConfigSelectorMsg::Drop(column, action, effect, index)
-                if action != DragTarget::Active =>
+                if action != DragTarget::Active && !action.is_staged() =>
             {
                 let col_type = ctx
                     .props()
@@ -269,14 +279,19 @@ impl Component for ConfigSelector {
                     ctx.props().metadata.get_features().unwrap(),
                 );
 
+                super::close_column_settings_if_displaced(
+                    &ctx.props().presentation,
+                    &ctx.props().renderer,
+                    &ctx.props().metadata,
+                    &ctx.props().view_config,
+                    &update,
+                );
+
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -302,11 +317,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
                 ctx.props().onselect.emit(());
@@ -347,11 +359,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -368,11 +377,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -390,17 +396,20 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
                 ctx.props().onselect.emit(());
                 false
             },
+            ConfigSelectorMsg::New(
+                DragTarget::WindowSource
+                | DragTarget::WindowOrderBy
+                | DragTarget::WindowPartitionBy,
+                _,
+            ) => false,
             ConfigSelectorMsg::New(DragTarget::Filter, InPlaceColumn::Column(column)) => {
                 let mut view_config = (*ctx.props().view_config).clone();
                 let op = ctx.props().default_op(column.as_str()).unwrap_or_default();
@@ -418,11 +427,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -440,11 +446,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -464,11 +467,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -488,11 +488,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -520,11 +517,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -546,11 +540,8 @@ impl Component for ConfigSelector {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("config-selector", task);
                     }
                 }
 
@@ -575,6 +566,18 @@ impl Component for ConfigSelector {
             ..
         } = ctx.props();
         let config = &ctx.props().view_config;
+
+        // What the ACTIVE plugin says these pivots draw — the same
+        // declaration the agent reads through `list_plugins`, so the
+        // label a user sees and the role a model is told cannot drift.
+        let plugin_roles = {
+            let plugin = &ctx.props().plugin_static_config;
+            (
+                plugin.group_by_role.clone().map(AttrValue::from),
+                plugin.split_by_role.clone().map(AttrValue::from),
+            )
+        };
+
         let transpose = ctx.link().callback(|_| ConfigSelectorMsg::TransposePivots);
         let column_dropdown = self.column_dropdown.clone();
         let mut class = classes!();
@@ -606,10 +609,20 @@ impl Component for ConfigSelector {
 
         let group_rollups = requirements.get_group_rollups(&rollup_features);
 
+        let on_split_rollup_mode = ctx
+            .link()
+            .callback(ConfigSelectorMsg::UpdateSplitRollupMode);
+
+        let split_rollup_features = metadata
+            .get_features()
+            .map(|x| x.get_split_rollup_modes())
+            .unwrap();
+
+        let split_rollups = requirements.get_split_rollups(&split_rollup_features);
+
         html! {
             <>
                 <div slot="top_panel" id="top_panel" {class} ondragend={dragend}>
-                    <LocalStyle href={css!("config-selector")} />
                     <div class="pivot_controls">
                         if group_rollups.len() > 1 {
                             <Select<GroupRollupMode>
@@ -638,6 +651,7 @@ impl Component for ConfigSelector {
                     if features.group_by {
                         <GroupBySelector
                             name="group_by"
+                            role_label={plugin_roles.0.clone()}
                             disabled={config.group_rollup_mode == GroupRollupMode::Total}
                             parent={ctx.link().clone()}
                             column_dropdown={column_dropdown.clone()}
@@ -660,18 +674,36 @@ impl Component for ConfigSelector {
                         </GroupBySelector>
                     }
                     if features.split_by {
-                        if !config.split_by.is_empty() {
+                        if !config.split_by.is_empty() || split_rollups.len() > 1 {
                             <div class="pivot_controls">
-                                <span
-                                    id="transpose_button"
-                                    class="rrow centered"
-                                    title="Transpose Pivots"
-                                    onmousedown={transpose}
-                                />
+                                if split_rollups.len() > 1 {
+                                    <Select<SplitRollupMode>
+                                        id="split_rollup_mode_selector"
+                                        wrapper_class="split_rollup_wrapper"
+                                        is_autosize=true
+                                        values={Rc::new(
+                                        split_rollups
+                                            .iter()
+                                            .map(|x| SelectItem::Option(*x))
+                                            .collect(),
+                                    )}
+                                        selected={config.split_rollup_mode}
+                                        on_select={on_split_rollup_mode}
+                                    />
+                                }
+                                if !config.split_by.is_empty() {
+                                    <span
+                                        id="transpose_button"
+                                        class="rrow centered"
+                                        title="Transpose Pivots"
+                                        onmousedown={transpose}
+                                    />
+                                }
                             </div>
                         }
                         <SplitBySelector
                             name="split_by"
+                            role_label={plugin_roles.1.clone()}
                             parent={ctx.link().clone()}
                             column_dropdown={column_dropdown.clone()}
                             exclude={config.split_by.iter().cloned().collect::<HashSet<_>>()}

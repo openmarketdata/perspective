@@ -66,37 +66,54 @@ pub async fn html_as_jsvalue(
 }
 
 /// Render the current view as a `.png` `Blob` via the active plugin's
-/// `render` method (typically only available for chart plugins).
+/// `render` method (typically only available for chart plugins). Chart
+/// plugins implement `render` as a full internal `draw` + snapshot, so the
+/// call must hold the renderer's draw lock like any other draw (see
+/// [`crate::js::plugin`]) or it would interleave with a concurrent
+/// `table_updated` redraw.
 pub async fn png_as_jsvalue(session: &Session, renderer: &Renderer) -> ApiResult<web_sys::Blob> {
-    let plugin = renderer.get_active_plugin()?;
-    let view: perspective_client::View = session
-        .get_view()
-        .ok_or(ApiError::from(ApiErrorType::NoTableError))?;
+    renderer
+        .clone()
+        .render_task(|_guard| async move {
+            let plugin = renderer.ensure_plugin_selected()?;
+            let view: perspective_client::View = session
+                .get_view()
+                .ok_or(ApiError::from(ApiErrorType::NoTableError))?;
 
-    let png = plugin.render(view.into(), None).await?;
-    Ok(png)
+            plugin.render(view.into(), None).await
+        })
+        .await
 }
 
 /// Render the current view as a `.txt` `Blob` via the active plugin's
-/// `render` method (typically used for the datagrid).
+/// `render` method (typically used for the datagrid). Locked for the same
+/// reason as [`png_as_jsvalue`].
 pub async fn txt_as_jsvalue(
     session: &Session,
     renderer: &Renderer,
     viewport: Option<ViewWindow>,
 ) -> ApiResult<web_sys::Blob> {
-    let plugin = renderer.get_active_plugin()?;
-    let view: perspective_client::View = session
-        .get_view()
-        .ok_or(ApiError::from(ApiErrorType::NoTableError))?;
+    renderer
+        .clone()
+        .render_task(|_guard| async move {
+            let plugin = renderer.ensure_plugin_selected()?;
+            let view: perspective_client::View = session
+                .get_view()
+                .ok_or(ApiError::from(ApiErrorType::NoTableError))?;
 
-    let txt = plugin
-        .render(view.into(), viewport.map(|x| x.into()))
-        .await?;
-
-    Ok(txt)
+            plugin.render(view.into(), viewport.map(|x| x.into())).await
+        })
+        .await
 }
 
 /// Generate a result `Blob` for all types of [`ExportMethod`].
+/// The `window` (or a default one) with Arrow IPC body compression `codec`.
+fn compressed(window: Option<ViewWindow>, codec: &str) -> Option<ViewWindow> {
+    let mut window = window.unwrap_or_default();
+    window.compression = Some(codec.to_owned());
+    Some(window)
+}
+
 pub async fn export_method_to_blob(
     session: &Session,
     renderer: &Renderer,
@@ -142,6 +159,36 @@ pub async fn export_method_to_blob(
         ExportMethod::ArrowAll => crate::queries::arrow_as_jsvalue(session, true, None)
             .await?
             .as_blob(),
+        ExportMethod::ArrowLz4 => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(None, "lz4"))
+                .await?
+                .as_blob()
+        },
+        ExportMethod::ArrowLz4Selected => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(viewport, "lz4"))
+                .await?
+                .as_blob()
+        },
+        ExportMethod::ArrowLz4All => {
+            crate::queries::arrow_as_jsvalue(session, true, compressed(None, "lz4"))
+                .await?
+                .as_blob()
+        },
+        ExportMethod::ArrowZstd => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(None, "zstd"))
+                .await?
+                .as_blob()
+        },
+        ExportMethod::ArrowZstdSelected => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(viewport, "zstd"))
+                .await?
+                .as_blob()
+        },
+        ExportMethod::ArrowZstdAll => {
+            crate::queries::arrow_as_jsvalue(session, true, compressed(None, "zstd"))
+                .await?
+                .as_blob()
+        },
         ExportMethod::Html => html_as_jsvalue(session, renderer, presentation)
             .await?
             .as_blob(),
@@ -202,6 +249,36 @@ pub async fn export_method_to_jsvalue(
         ExportMethod::ArrowAll => crate::queries::arrow_as_jsvalue(session, true, None)
             .await?
             .into(),
+        ExportMethod::ArrowLz4 => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(None, "lz4"))
+                .await?
+                .into()
+        },
+        ExportMethod::ArrowLz4Selected => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(viewport, "lz4"))
+                .await?
+                .into()
+        },
+        ExportMethod::ArrowLz4All => {
+            crate::queries::arrow_as_jsvalue(session, true, compressed(None, "lz4"))
+                .await?
+                .into()
+        },
+        ExportMethod::ArrowZstd => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(None, "zstd"))
+                .await?
+                .into()
+        },
+        ExportMethod::ArrowZstdSelected => {
+            crate::queries::arrow_as_jsvalue(session, false, compressed(viewport, "zstd"))
+                .await?
+                .into()
+        },
+        ExportMethod::ArrowZstdAll => {
+            crate::queries::arrow_as_jsvalue(session, true, compressed(None, "zstd"))
+                .await?
+                .into()
+        },
         ExportMethod::Html => html_as_jsvalue(session, renderer, presentation).await?,
         ExportMethod::Plugin if renderer.is_chart() => {
             png_as_jsvalue(session, renderer).await?.into()

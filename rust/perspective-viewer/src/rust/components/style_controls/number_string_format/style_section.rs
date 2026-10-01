@@ -13,9 +13,9 @@
 use yew::html;
 
 use super::CustomNumberFormat;
-use crate::components::form::select_enum_field::SelectEnumField;
 use crate::components::style_controls::{CustomNumberFormatMsg, NumberStyle};
 use crate::config::*;
+use crate::ui::SelectEnumField;
 
 impl CustomNumberFormat {
     pub fn style_section(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
@@ -60,6 +60,7 @@ impl CustomNumberFormat {
                 <SelectEnumField<NumberStyle>
                     label="style"
                     current_value={self.style}
+                    default_value={NumberStyle::from(&ctx.props().defaults.style)}
                     on_change={ctx.link().callback(CustomNumberFormatMsg::StyleChanged)}
                 />
                 { section }

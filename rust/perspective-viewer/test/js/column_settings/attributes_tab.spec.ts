@@ -10,10 +10,15 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-import { test, expect, PageView } from "../helpers.ts";
+import {
+    test,
+    expect,
+    PageView,
+    compareInnerHTMLToSnapshot,
+} from "../helpers.ts";
 
 test.beforeEach(async ({ page }) => {
-    await page.goto("/tools/test/src/html/basic-test.html");
+    await page.goto("/rust/perspective-viewer/test/html/superstore-debug.html");
     await page.evaluate(async () => {
         while (!window["__TEST_PERSPECTIVE_READY__"]) {
             await new Promise((x) => setTimeout(x, 10));
@@ -38,9 +43,15 @@ test.describe("Attributes Tab", () => {
         await expr.editBtn.click();
         let input = view.columnSettingsSidebar.nameInput;
         await view.columnSettingsSidebar.openTab("Style");
-        await expect(input).toBeDisabled();
+        await compareInnerHTMLToSnapshot(
+            view.columnSettingsSidebar.nameInputWrapper,
+            ["style-tab"],
+        );
         await view.columnSettingsSidebar.openTab("Attributes");
-        await expect(input).toBeEnabled();
+        await compareInnerHTMLToSnapshot(
+            view.columnSettingsSidebar.nameInputWrapper,
+            ["attributes-tab"],
+        );
     });
 
     test("Empty expression names", async ({ page }) => {
@@ -51,9 +62,9 @@ test.describe("Attributes Tab", () => {
         await view.settingsPanel.createNewExpression("", expr_value);
         // Empty text matches expression
         let input = view.columnSettingsSidebar.nameInput;
-        expect(await input.evaluate((input) => input!.value)).toBe("");
-        expect(await input.evaluate((input) => input!.placeholder)).toBe(
-            expr_value,
+        await compareInnerHTMLToSnapshot(
+            view.columnSettingsSidebar.nameInputWrapper,
+            ["header"],
         );
         // Reopening the column shows an empty header with placeholder text that matches
         await view.columnSettingsSidebar.closeBtn.click();
@@ -62,9 +73,10 @@ test.describe("Attributes Tab", () => {
                 expr_value,
             );
         await expr.editBtn.click();
-        expect(await input.evaluate((input) => input!.value)).toBe("");
-        expect(await input.evaluate((input) => input!.placeholder)).toBe(
-            expr_value,
+        await input.waitFor();
+        await compareInnerHTMLToSnapshot(
+            view.columnSettingsSidebar.nameInputWrapper,
+            ["header"],
         );
         // Expression alias is the expression on serialization
         let config = await view.save();
@@ -205,5 +217,67 @@ test.describe("Attributes Tab", () => {
         // `const settings = {expressions: {"SOME_ID": {name: "foobar", expr: "123"}, "ANOTHER_ID": {expr: "'i have no name'"}}};`
         // We could then change the ColumnLocator struct to look like this:
         // `enum ColumnLocator {TableColumn(String), ExprColumn(Option<String>), NewExpr()}`
+    });
+});
+
+test.describe("Column settings header drafts", () => {
+    test("a header draft survives a tab switch and an unrelated commit", async ({
+        page,
+    }) => {
+        const view = new PageView(page);
+        await view.restore({
+            settings: true,
+            expressions: { expr: "12345" },
+            columns: ["Row ID", "expr"],
+        });
+
+        const expr =
+            await view.settingsPanel.activeColumns.getColumnByName("expr");
+        await expr.editBtn.click();
+        const sidebar = view.columnSettingsSidebar;
+        await sidebar.openTab("Attributes");
+        await sidebar.nameInput.fill("renamed");
+        await expect(sidebar.nameInputWrapper).toHaveClass(/edited/);
+        await expect(sidebar.attributesTab.saveBtn).toBeEnabled();
+
+        await sidebar.openTab("Style");
+        await sidebar.openTab("Attributes");
+        await expect(sidebar.nameInput).toHaveValue("renamed");
+        await expect(sidebar.attributesTab.saveBtn).toBeEnabled();
+
+        await view.restore({ sort: [["Row ID", "desc"]] });
+        await expect(sidebar.nameInput).toHaveValue("renamed");
+        await expect(sidebar.attributesTab.saveBtn).toBeEnabled();
+
+        await sidebar.attributesTab.resetBtn.click();
+        await expect(sidebar.nameInput).toHaveValue("expr");
+        await expect(sidebar.nameInputWrapper).not.toHaveClass(/edited/);
+        await expect(sidebar.attributesTab.saveBtn).toBeDisabled();
+    });
+
+    test("renaming re-targets the drawer on the new name, still editable", async ({
+        page,
+    }) => {
+        const view = new PageView(page);
+        await view.restore({
+            settings: true,
+            expressions: { expr: "12345" },
+            columns: ["Row ID", "expr"],
+        });
+
+        const expr =
+            await view.settingsPanel.activeColumns.getColumnByName("expr");
+        await expr.editBtn.click();
+        const sidebar = view.columnSettingsSidebar;
+        await sidebar.openTab("Attributes");
+        await sidebar.nameInput.fill("renamed");
+        await sidebar.attributesTab.saveBtn.click();
+
+        await expect(sidebar.nameInput).toHaveValue("renamed");
+        await compareInnerHTMLToSnapshot(sidebar.container, ["retargeted"]);
+
+        const config = await view.save();
+        expect(Object.keys(config.expressions ?? {})).toEqual(["renamed"]);
+        expect(config.columns).toEqual(["Row ID", "renamed"]);
     });
 });

@@ -14,6 +14,7 @@ import type { Client, View, ViewConfig } from "@perspective-dev/client";
 import type { FacetConfig, PluginConfig } from "../charts/chart";
 import type {
     ControlMsg,
+    ErrorMsg,
     InitMsg,
     InteractionEvent,
     LoadAndRenderMsg,
@@ -26,6 +27,7 @@ import {
 } from "../event-detail";
 import { snapshotThemeVars } from "../theme/theme-snapshot";
 import { snapshotFontFaces } from "../utils/font-snapshot";
+import { TILE_SOURCES } from "../map/tile-source";
 import { DomHostSink } from "../interaction/host-sink-dom";
 import { RUNTIME_MODE } from "../config";
 
@@ -72,6 +74,24 @@ async function getSharedWorker(): Promise<Worker> {
             const env = e.data as WorkerEnvelope;
             HOST_LISTENERS.get(env.sessionId)?.(env.msg);
         });
+
+        let poisoned = false;
+        w.addEventListener("error", (event: ErrorEvent) => {
+            if (poisoned) {
+                return;
+            }
+
+            poisoned = true;
+            SHARED_WORKER = null;
+            const detail = event.message || `failed to load ${url}`;
+            const message = `perspective-viewer-charts renderer worker error: ${detail}`;
+            console.error(message, event.error ?? "");
+            const errorMsg: ErrorMsg = { kind: "error", message };
+            for (const listener of HOST_LISTENERS.values()) {
+                listener(errorMsg);
+            }
+        });
+
         return w;
     })();
 
@@ -84,7 +104,11 @@ interface RendererHandle {
     terminate(): void;
 }
 
-type PendingRenderType = "saveZoom" | "loadAndRender" | "snapshotPng";
+type PendingRenderType =
+    | "saveZoom"
+    | "loadAndRender"
+    | "snapshotPng"
+    | "resize";
 interface PendingRenderRequest {
     kind: PendingRenderType;
     resolve: (v: any) => void;
@@ -110,11 +134,22 @@ interface PendingRenderRequest {
  */
 export class RendererTransport {
     private _handle: RendererHandle | null = null;
+
+    /**
+     * Set by {@link destroy}. Requests allocated after teardown settle
+     * immediately in `_allocPending` — `_post` is already a no-op once
+     * `_handle` is null, so a late request would otherwise never
+     * receive its reply and pend forever.
+     */
+    private _destroyed = false;
     private _proxyChannel: MessageChannel | null = null;
     private _proxySession: any = null;
     private _client: Client;
     private _view: View;
     private _tableName: string | undefined;
+    /** Source panel `slot`, tagged onto dispatched interaction events so the
+     * host can route them (master/detail, global filter) to the right panel. */
+    private _panel: string | undefined;
     private _clientWorkerURL: URL;
     private _clientWasm: WebAssembly.Module;
     private _chartTag: string;
@@ -141,6 +176,10 @@ export class RendererTransport {
     private _pendingCounter = 0;
     private _onZoomChanged: ((isDefault: boolean) => void) | null = null;
 
+    private _onPluginConfigDelta:
+        | ((fields: Record<string, string | number | boolean>) => void)
+        | null = null;
+
     /**
      * Cached zoom-default flag pushed by the renderer after each zoom
      * mutation. Surfaced sync via `allZoomsDefault()`; updates between
@@ -157,6 +196,37 @@ export class RendererTransport {
      * canvas's drawing buffer is the worker's transferred GL canvas).
      */
     private _displayCtx: CanvasRenderingContext2D | null = null;
+
+    /**
+     * Present-hold state for the staged-present presize protocol
+     * ({@link presize}). While holding, inbound `frameBitmap`s are
+     * STAGED (latest wins) instead of blitted, so the on-screen frame
+     * — old dimensions in the old, unchanged box — stays put until the
+     * host invokes the present closure `presize` resolved to, in the
+     * same task as its layout commit. Entered only by `presize`;
+     * exited by the present closure, by `presize`'s rejection path, or
+     * by `destroy` — every settle path releases the hold or hands the
+     * caller the release.
+     */
+    /**
+     * The last `(cssWidth, cssHeight, dpr)` posted to the worker — at init
+     * or any resize — i.e. the dimensions the worker has already rendered
+     * (or has an in-flight render for). {@link resize} short-circuits when
+     * its measurement matches (±0.5px, the presize protocol's own
+     * threshold): reactive resizes fan in from several host paths per
+     * layout transition (the post-commit fan-out, activation nudges, the
+     * fresh-restore tail), and every worker resize is an unconditional
+     * full re-render.
+     */
+    private _lastPostedSize: {
+        cssWidth: number;
+        cssHeight: number;
+        dpr: number;
+    } | null = null;
+
+    private _holdPresent = false;
+
+    private _stagedFrame: ImageBitmap | null = null;
 
     /**
      * Host-side sink for tooltip + cursor side-effects. The chart
@@ -182,22 +252,28 @@ export class RendererTransport {
         client: Client;
         view: View;
         tableName?: string;
+        panel?: string;
         clientWasm: WebAssembly.Module;
         clientWorkerURL: URL;
         chartTag: string;
         maxCells: number;
         precompileShaders?: boolean;
         onZoomChanged?: (isDefault: boolean) => void;
+        onPluginConfigDelta?: (
+            fields: Record<string, string | number | boolean>,
+        ) => void;
     }) {
         this._client = opts.client;
         this._view = opts.view;
         this._tableName = opts.tableName;
+        this._panel = opts.panel;
         this._clientWorkerURL = opts.clientWorkerURL;
         this._clientWasm = opts.clientWasm;
         this._chartTag = opts.chartTag;
         this._maxCells = opts.maxCells;
         this._precompileShaders = opts.precompileShaders ?? false;
         this._onZoomChanged = opts.onZoomChanged ?? null;
+        this._onPluginConfigDelta = opts.onPluginConfigDelta ?? null;
         this._ready = new Promise((resolve, reject) => {
             this._resolveReady = resolve;
             this._rejectReady = reject;
@@ -210,6 +286,7 @@ export class RendererTransport {
         chrome: HTMLCanvasElement;
         facetConfig: FacetConfig;
         pluginConfig: PluginConfig;
+        columnsConfig?: Record<string, any>;
         defaultChartType?: string;
         renderBlitMode: "blit" | "direct";
     }): Promise<void> {
@@ -250,15 +327,24 @@ export class RendererTransport {
         // `ImageBitmap`. Direct mode transfers the visible canvas's
         // drawing buffer to the renderer so GL paints straight to
         // screen.
+        // Blit mode also keeps the gridlines/chrome layers worker-side:
+        // a transferred canvas presents on the compositor's schedule,
+        // unsynchronized with the host's layout commits, so it can't
+        // participate in the staged-present hold. The renderer
+        // composites both layers into the shipped frame instead, and
+        // the host-side placeholder canvases stay untouched
+        // (transparent). Direct mode transfers all three surfaces.
         let glOC: OffscreenCanvas | undefined;
+        let gridlinesOC: OffscreenCanvas | undefined;
+        let chromeOC: OffscreenCanvas | undefined;
         if (opts.renderBlitMode === "blit") {
             this._displayCtx = opts.gl.getContext("2d");
         } else {
             glOC = opts.gl.transferControlToOffscreen();
+            gridlinesOC = opts.gridlines.transferControlToOffscreen();
+            chromeOC = opts.chrome.transferControlToOffscreen();
         }
 
-        const gridlinesOC = opts.gridlines.transferControlToOffscreen();
-        const chromeOC = opts.chrome.transferControlToOffscreen();
         const rect = opts.gl.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
         const themeVars = snapshotThemeVars(opts.gl);
@@ -291,7 +377,11 @@ export class RendererTransport {
             tableName: this._tableName,
             facetConfig: opts.facetConfig,
             pluginConfig: opts.pluginConfig,
+            columnsConfig: opts.columnsConfig,
             defaultChartType: opts.defaultChartType,
+            tileSource: TILE_SOURCES.specFor(
+                opts.pluginConfig.map_tile_provider,
+            ),
             themeVars,
             fontFaces,
             cssWidth: rect.width,
@@ -301,6 +391,11 @@ export class RendererTransport {
             precompileShaders: this._precompileShaders,
         };
 
+        this._lastPostedSize = {
+            cssWidth: rect.width,
+            cssHeight: rect.height,
+            dpr,
+        };
         this._handle = await this._createHandle(workerURL, initMsg);
         this._handle.addMessageListener((msg) =>
             this._handleRendererMsg(msg as WorkerMsg),
@@ -310,14 +405,19 @@ export class RendererTransport {
             // Worker mode: the bootstrap is triggered by posting the
             // init message into the worker's scope (which the
             // `if (IS_WORKER_SCOPE)` block in `renderer.worker.ts`
-            // listens for). `glOC` is omitted in blit mode (the
-            // renderer allocates its own offscreen) — only include the
-            // GL canvas in the transfer list when present.
-            const transfer: Transferable[] = [
-                gridlinesOC,
-                chromeOC,
-                this._proxyChannel!.port2,
-            ];
+            // listens for). All three canvases are omitted in blit mode
+            // (the renderer allocates its own offscreens and ships
+            // composited frames) — only include the transferred
+            // surfaces present on this mode's init message.
+            const transfer: Transferable[] = [this._proxyChannel!.port2];
+            if (chromeOC) {
+                transfer.unshift(chromeOC);
+            }
+
+            if (gridlinesOC) {
+                transfer.unshift(gridlinesOC);
+            }
+
             if (glOC) {
                 transfer.unshift(glOC);
             }
@@ -419,7 +519,11 @@ export class RendererTransport {
     }
 
     setPluginConfig(cfg: PluginConfig): void {
-        this._post({ kind: "setPluginConfig", cfg });
+        this._post({
+            kind: "setPluginConfig",
+            cfg,
+            tileSource: TILE_SOURCES.specFor(cfg.map_tile_provider),
+        });
     }
 
     setBufferMaxCapacity(n: number): void {
@@ -438,7 +542,8 @@ export class RendererTransport {
      * `loadAndRenderAck`. Per the worker's "resolve on stale"
      * contract, a mid-flight cancellation (a newer `loadAndRender`
      * superseding this one) still acks — the host's awaiter just
-     * resolves quietly.
+     * resolves quietly. Calls issued after `destroy()` resolve
+     * immediately (see `_allocPending`).
      */
     loadAndRender(opts: {
         viewerConfig: {
@@ -464,19 +569,107 @@ export class RendererTransport {
         this._post({ kind: "redraw" });
     }
 
-    resize(): void {
+    /**
+     * Silently clear the worker chart's selection state (pinned tooltip) —
+     * no selection events are emitted; the worker echoes `dismissTooltip`
+     * to drop the host-side pinned artifact. See `DeselectMsg`.
+     */
+    deselect(): void {
+        this._post({ kind: "deselect" });
+    }
+
+    /**
+     * Resize the chart to the GL canvas's CURRENT CSS box and resolve
+     * once the resized frame has PRESENTED (the worker's `resizeAck`) —
+     * not at message-post, which would let callers proceed while the
+     * old-dimensions bitmap is still on screen. Reactive geometry
+     * changes only; anticipated ones go through {@link presize}.
+     *
+     * A measurement matching {@link _lastPostedSize} resolves immediately
+     * WITHOUT a worker round trip: the worker has already rendered (or is
+     * presenting) that exact frame, and re-posting would be a full
+     * re-render of an identical bitmap.
+     */
+    resize(): Promise<void> {
         if (!this._hostGlCanvas) {
-            return;
+            return Promise.resolve();
         }
 
         const rect = this._hostGlCanvas.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
+        const last = this._lastPostedSize;
+        if (
+            last &&
+            Math.abs(last.cssWidth - rect.width) <= 0.5 &&
+            Math.abs(last.cssHeight - rect.height) <= 0.5 &&
+            last.dpr === dpr
+        ) {
+            return Promise.resolve();
+        }
+
+        return this._postResize(rect.width, rect.height);
+    }
+
+    /**
+     * Staged-present variant of {@link resize}: render at the given
+     * TARGET canvas CSS box (no measurement — the caller supplies the
+     * box the pending layout commit will produce), HOLDING the
+     * resulting frame (and any others that arrive meanwhile) offscreen
+     * instead of blitting, so nothing on screen changes. Resolves,
+     * once the resized frame is staged, to a present closure: calling
+     * it blits the latest staged frame and exits the hold — the host
+     * runs it in the same task as its layout commit so geometry and
+     * pixels land in one paint. On rejection (teardown) the hold is
+     * released here, so every settle path either frees the display or
+     * hands the caller the release.
+     */
+    presize(cssWidth: number, cssHeight: number): Promise<(() => void) | void> {
+        if (!this._hostGlCanvas) {
+            return Promise.resolve();
+        }
+
+        const dpr = window.devicePixelRatio || 1;
+        const last = this._lastPostedSize;
+        if (
+            last &&
+            Math.abs(last.cssWidth - cssWidth) <= 0.5 &&
+            Math.abs(last.cssHeight - cssHeight) <= 0.5 &&
+            last.dpr === dpr
+        ) {
+            return Promise.resolve();
+        }
+
+        this._holdPresent = true;
+        return this._postResize(cssWidth, cssHeight).then(
+            () => () => this._presentStaged(),
+            (err) => {
+                this._presentStaged();
+                throw err;
+            },
+        );
+    }
+
+    private _postResize(cssWidth: number, cssHeight: number): Promise<void> {
+        const dpr = window.devicePixelRatio || 1;
+        const { id, promise } = this._allocPending<void>("resize");
+        this._lastPostedSize = { cssWidth, cssHeight, dpr };
         this._post({
             kind: "resize",
-            cssWidth: rect.width,
-            cssHeight: rect.height,
+            msgId: id,
+            cssWidth,
+            cssHeight,
             dpr,
         });
+        return promise;
+    }
+
+    private _presentStaged(): void {
+        this._holdPresent = false;
+        const staged = this._stagedFrame;
+        this._stagedFrame = null;
+        if (staged) {
+            this._drawFrameBitmap(staged);
+        }
     }
 
     clear() {
@@ -501,12 +694,39 @@ export class RendererTransport {
      * Allocate a pending request slot of the given `kind`. Returns the
      * id (encoded into the outgoing `ControlMsg`) and a promise that
      * resolves / rejects when the matching reply arrives or
-     * `destroy()` drains the table.
+     * `destroy()` drains the table. Requests issued *after* `destroy()`
+     * settle immediately with the same per-kind semantics as the drain.
      */
     private _allocPending<T>(kind: PendingRenderType): {
         id: number;
         promise: Promise<T>;
     } {
+        // A request issued after `destroy()` would never settle: `_post`
+        // no-ops with no handle, so no reply ever lands — and the host
+        // awaits `loadAndRender` while holding its per-renderer draw
+        // lock, so a pending-forever promise wedges that panel's lock
+        // permanently. (Reachable when an external DOM disconnect
+        // `delete()`s the element mid-draw; the host's own teardown
+        // paths are serialized behind the same lock.) Mirror the
+        // `destroy()` drain: `loadAndRender` resolves silently,
+        // reply-bearing kinds reject. The pre-attached no-op `catch`
+        // marks the rejection handled for fire-and-forget callers
+        // (`saveZoom`) without affecting real awaiters.
+        if (this._destroyed) {
+            if (kind === "loadAndRender") {
+                return {
+                    id: -1,
+                    promise: Promise.resolve(undefined as unknown as T),
+                };
+            }
+
+            const promise = Promise.reject<T>(
+                new Error("RendererTransport destroyed"),
+            );
+            promise.catch(() => {});
+            return { id: -1, promise };
+        }
+
         const id = ++this._pendingCounter;
         const promise = new Promise<T>((resolve, reject) => {
             this._pending.set(id, { kind, resolve, reject });
@@ -548,6 +768,7 @@ export class RendererTransport {
     }
 
     destroy(): void {
+        this._destroyed = true;
         this._post({ kind: "destroy" });
         if (this._proxySession) {
             this._proxySession.close().catch(() => {});
@@ -572,6 +793,9 @@ export class RendererTransport {
         // them, and so the GPU-backed 2D context can release earlier.
         this._hostGlCanvas = null;
         this._displayCtx = null;
+        this._holdPresent = false;
+        this._stagedFrame?.close();
+        this._stagedFrame = null;
 
         // Drain pending request promises with kind-aware semantics:
         //  - `loadAndRender` resolves silently (the host's awaited draw
@@ -618,13 +842,21 @@ export class RendererTransport {
                 this._resolvePending(msg.requestId, "saveZoom", msg.state);
                 break;
             case "pinTooltip":
-                this._ensureHostSink()?.pin(msg.lines, msg.pos, msg.bounds);
+                this._ensureHostSink()?.pin(
+                    msg.grid,
+                    msg.pos,
+                    msg.bounds,
+                    msg.style,
+                );
                 break;
             case "dismissTooltip":
                 this._hostSink?.dismiss();
                 break;
             case "setCursor":
                 this._ensureHostSink()?.setCursor(msg.cursor);
+                break;
+            case "pluginConfigDelta":
+                this._onPluginConfigDelta?.(msg.fields);
                 break;
             case "userClick":
                 this._dispatchOnViewer(
@@ -633,7 +865,9 @@ export class RendererTransport {
                         {
                             bubbles: true,
                             composed: true,
-                            detail: msg.detail,
+                            // Tag with the source panel so a multi-panel host
+                            // can attribute the click to the right panel.
+                            detail: { ...msg.detail, panel: this._panel },
                         },
                     ),
                 );
@@ -658,6 +892,9 @@ export class RendererTransport {
                     removeConfigs as any,
                     insertConfigs as any,
                 );
+                // Tag with the source panel so the host's master/detail +
+                // global-filter routing can identify the originating panel.
+                detail.panel = this._panel;
                 this._dispatchOnViewer(
                     new CustomEvent<PerspectiveSelectDetail>(
                         "perspective-global-filter",
@@ -672,16 +909,47 @@ export class RendererTransport {
             }
 
             case "frameBitmap":
-                this._drawFrameBitmap(msg.bitmap);
+                if (this._holdPresent) {
+                    this._stagedFrame?.close();
+                    this._stagedFrame = msg.bitmap;
+                } else {
+                    this._drawFrameBitmap(msg.bitmap);
+                }
+
                 break;
             case "error":
                 this._rejectReady(new Error(msg.message));
                 break;
             case "loadAndRenderAck":
-                this._resolvePending(msg.msgId, "loadAndRender", undefined);
+                if (msg.error !== undefined) {
+                    this._rejectPending(
+                        msg.msgId,
+                        "loadAndRender",
+                        new Error(msg.error),
+                    );
+                } else {
+                    this._resolvePending(msg.msgId, "loadAndRender", undefined);
+                }
+
+                break;
+            case "resizeAck":
+                this._resolvePending(msg.msgId, "resize", undefined);
                 break;
             case "snapshotPngReply":
-                this._resolvePending(msg.requestId, "snapshotPng", msg.blob);
+                if (msg.error !== undefined) {
+                    this._rejectPending(
+                        msg.requestId,
+                        "snapshotPng",
+                        new Error(msg.error),
+                    );
+                } else {
+                    this._resolvePending(
+                        msg.requestId,
+                        "snapshotPng",
+                        msg.blob,
+                    );
+                }
+
                 break;
         }
     }
@@ -705,6 +973,20 @@ export class RendererTransport {
 
         this._pending.delete(id);
         entry.resolve(value);
+    }
+
+    private _rejectPending(
+        id: number,
+        kind: PendingRenderType,
+        error: Error,
+    ): void {
+        const entry = this._pending.get(id);
+        if (!entry || entry.kind !== kind) {
+            return;
+        }
+
+        this._pending.delete(id);
+        entry.reject(error);
     }
 
     /**

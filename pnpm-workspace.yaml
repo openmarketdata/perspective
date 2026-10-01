@@ -7,6 +7,7 @@ packages:
     - "packages/viewer-datagrid"
     - "packages/viewer-charts"
     - "packages/workspace"
+    - "packages/anywidget"
     - "packages/jupyterlab"
     - "packages/react"
     - "packages/cli"
@@ -18,6 +19,14 @@ packages:
     - "rust/perspective-server"
     - "examples/*"
     - "docs"
+
+allowBuilds:
+    "@fortawesome/fontawesome-free": true
+    aws-sdk: true
+    core-js: true
+    esbuild: true
+    microtime: true
+    puppeteer: false
 
 catalog:
     # Dependencies
@@ -35,19 +44,19 @@ catalog:
     "pro_self_extracting_wasm": "0.0.9"
     "react-dom": ">17 <20"
     "react": ">17 <20"
-    "regular-table": "=0.8.4"
+    "regular-layout": "=0.6.1"
+    "regular-table": "=0.9.1"
     "stoppable": "=1.1.0"
     "ws": "^8.17.0"
 
     # Dev Dependencies
     "@clickhouse/client-web": "^1.12.0"
     "@duckdb/duckdb-wasm": "1.33.1-dev18.0"
-    "@duckdb/duckdb-wasm-shell": "^1.30.0"
     "@fontsource/roboto-mono": "4.5.10"
     "@iarna/toml": "3.0.0"
     "@jupyterlab/builder": "^4"
-    "@playwright/experimental-ct-react": "=1.58.0"
-    "@playwright/test": "=1.58.0"
+    "@playwright/experimental-ct-react": "=1.62.0"
+    "@playwright/test": "=1.62.0"
     "lightningcss": "^1.29.0"
     "@types/lodash": "^4.17.20"
     "@types/node": ">=22"

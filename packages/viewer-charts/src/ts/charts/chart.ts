@@ -11,6 +11,7 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import type { View } from "@perspective-dev/client";
+import { TILE_SOURCES } from "../map/tile-source";
 import type { ColumnDataMap } from "../data/view-reader";
 import type { WebGLContextManager } from "../webgl/context-manager";
 import type { ZoomController } from "../interaction/zoom-controller";
@@ -44,12 +45,22 @@ export interface ChartImplementation {
     requestRender(glManager: WebGLContextManager): Promise<void>;
 
     /**
-     * The chart-specific frame builder. The scheduler wraps this with
-     * fence + `endFrame`; callers must not invoke it directly except
-     * for `snapshotPng`, which needs an intact GL backbuffer for
-     * `gl.readPixels` and so must skip the `endFrame` pair.
+     * The chart-specific GL frame builder. Submits the GL draw commands
+     * and stashes the frame's 2D-canvas draws (gridlines + chrome) for
+     * the scheduler to flush after `awaitGpuFence`. The scheduler wraps
+     * this with fence + 2D flush + `endFrame`; callers must not invoke
+     * it directly — `snapshotPng` uses {@link renderFrameSync} instead.
      */
     _fullRender(glManager: WebGLContextManager): void;
+
+    /**
+     * Synchronous full frame (GL + 2D) for the `snapshotPng` bypass,
+     * which sits outside the scheduler and needs the gridline/chrome
+     * canvases painted before compositing. Runs the GL pass then flushes
+     * the deferred 2D draws immediately, skipping the fence split and
+     * `endFrame` so the GL backbuffer stays intact for `gl.readPixels`.
+     */
+    renderFrameSync(glManager: WebGLContextManager): void;
 
     /**
      * Hand the current View to the chart so it can make on-demand
@@ -73,6 +84,11 @@ export interface ChartImplementation {
      * Set the chrome canvas (above WebGL, for axes/labels/legend/tooltip).
      */
     setChromeCanvas?(canvas: HTMLCanvasElement | OffscreenCanvas): void;
+
+    /**
+     * Install the renderer's overlay-present hook.
+     */
+    setOverlayPresenter?(cb: () => void): void;
 
     /**
      * Hand the chart a pre-computed CSS-variable map produced on the
@@ -174,6 +190,17 @@ export interface ChartImplementation {
      */
     resetExpandedDomain?(): void;
 
+    /**
+     * Silently clear any active selection state (pinned tooltip) WITHOUT
+     * emitting selection events. Driven from the host's `deselect`
+     * message — its global filter bar removed a clause this chart's
+     * selection contributed, so an unselect emit would double-mutate the
+     * host's filter set.
+     */
+    deselect?(): void;
+
+    repaintChrome?(): void;
+
     destroy(): void;
 }
 
@@ -246,8 +273,19 @@ export interface PluginConfig {
      * Faceting strategy when `split_by` is non-empty.
      *
      * - `"grid"` — one small-multiple sub-plot per split group.
-     * - `"overlay"` — single plot with split groups differentiated by
-     *   color. Synced into `_facetConfig.facet_mode`.
+     * - `"overlay"` — a single plot: cartesian charts differentiate
+     *   split groups by color; the categorical band pipeline (series
+     *   charts) stacks splits within each aggregate's band slot.
+     *   Synced into `_facetConfig.facet_mode`.
+     *
+     * The default differs by family via
+     * `ChartTypeConfig.plugin_field_defaults`: cartesian / density /
+     * map chart types default to `"grid"`, the series / financial
+     * band-pipeline types to `"overlay"` (their historical split
+     * rendering). Series charts REBUILD on a mode change — grid mode
+     * keys the stack ladder per split (`facetSplits` in
+     * `buildSeriesPipeline`) so each facet grows from its own
+     * baseline.
      */
     facet_mode: "grid" | "overlay";
 
@@ -283,15 +321,23 @@ export interface PluginConfig {
     /**
      * Domain accumulation policy across successive `View` updates.
      *
-     * - `"fit"` — every update recomputes the rendered domain (and on
-     *   cartesian charts, the X/Y range and color/size scales) from
+     * - `"fit"` — every update recomputes the affected domains from
      *   the current data extent. Can grow or shrink frame-to-frame.
-     * - `"expand"` — the rendered domain monotonically *grows*: each
+     * - `"expand"` — the affected domains monotonically *grow*: each
      *   update unions the new data extent with the previously rendered
      *   extent, so once a value is in scope it stays in scope. Reset
      *   by the "Reset Zoom" button, view-config changes (group_by /
      *   split_by / column-slot / column-type), or toggling back to
      *   `"fit"`.
+     *
+     * AXIS SCOPE differs by family: cartesian charts (X/Y Scatter,
+     * X/Y Line, Density, Maps) apply it to BOTH axes plus the
+     * color/size scales (categorical string axes opt out — slot
+     * indices are frame-local); the categorical band pipeline (series
+     * / financial) applies it to the VALUE axis only — Y for the
+     * Y-family, X for X Bar — while the category axis always fits, so
+     * a streaming numeric/datetime `group_by` axis releases departed
+     * categories instead of pinning to its history.
      */
     domain_mode: "fit" | "expand";
 
@@ -388,13 +434,15 @@ export interface PluginConfig {
     gradient_color_mode: "mean" | "density" | "extreme" | "signed";
 
     /**
-     * Map basemap tile provider. Applies only to map plugin tags
-     * (`map-scatter`, `map-line`, `map-density`). Cartesian charts
-     * ignore the field. Surfaced as an enum on the settings panel so
-     * users can switch light/dark/voyager without writing custom
-     * tile-source code.
+     * Map basemap tile provider — a `TileSourceSpec` id from the
+     * tile-source registry ([map/tile-sources.json] entries plus any
+     * runtime `registerTileSource` additions). Applies only to map
+     * plugin tags (`map-scatter`, `map-line`, `map-density`); other
+     * charts ignore the field. The default is the JSON's FIRST entry
+     * (reordering the file changes the default), and unknown ids fall
+     * back to that same entry rather than blanking the map.
      */
-    map_tile_provider: "carto-positron" | "carto-dark-matter" | "carto-voyager";
+    map_tile_provider: string;
 
     /**
      * Map basemap alpha (0..1). Pre-multiplied into the tile fragment
@@ -403,7 +451,90 @@ export interface PluginConfig {
      * shows the tiles at full opacity.
      */
     map_tile_alpha: number;
+
+    /**
+     * Map plugins only. `true` (default): standard numeric axes in the
+     * usual cartesian gutters, with tick labels in degrees
+     * longitude/latitude (`122.4°W`) rather than Mercator meters.
+     * `false`: no axes, and the plot is full-bleed — the basemap fills
+     * the entire canvas, minus only the sidebar legend gutter when a
+     * legend is actually shown. Gridlines are never drawn in map mode
+     * — the gridline canvas composites BELOW the GL layer, so opaque
+     * basemap tiles would hide them.
+     */
+    numeric_axes: boolean;
+
+    /**
+     * Legend presentation mode. `"auto"` (default) resolves per frame
+     * to `"floating"` when every entry fits the default floating panel
+     * without scrolling (≤ 7 entries; continuous gradient legends
+     * always qualify) and to `"sidebar"` otherwise — see
+     * `resolveLegendMode`. Treemap overrides the default to
+     * `"sidebar"` (a floating panel over edge-to-edge tiles always
+     * occludes data).
+     */
+    legend_mode: "auto" | "sidebar" | "none" | "floating";
+
+    /**
+     * Floating-panel sizing regime. `"auto"` (default) sizes the panel
+     * to its CONTENT every frame — the height hugs the entry rows
+     * exactly, and the width hugs the widest entry label (measured on
+     * the chrome canvas). `"fixed"` uses the saved `legend_width_px` /
+     * `legend_height_px` verbatim.
+     *
+     * Applies to `legend_mode: "floating"` ONLY; the sidebar gutter is
+     * always `legend_width_px` (its height is the plot's). Dragging a
+     * resize handle switches an auto panel to `"fixed"` — otherwise
+     * the gesture would be undone by the next paint — and
+     * double-clicking a resize handle switches it back.
+     */
+    legend_size_mode: LegendSizeMode;
+
+    /**
+     * Legend width in CSS pixels. `0` (default) = automatic — each
+     * chart family keeps its historical gutter width (80–96px). In
+     * `"sidebar"` mode this is the full right-gutter width; in
+     * `"floating"` mode it is the panel width. Clamped at paint time
+     * to at most half the canvas width so a saved wide legend cannot
+     * crush a small panel. Ignored by a floating panel in
+     * `legend_size_mode: "auto"`.
+     */
+    legend_width_px: number;
+
+    /**
+     * Floating-legend panel height in CSS pixels. Ignored in
+     * `"sidebar"` mode (the legend spans the plot height) and by a
+     * floating panel in `legend_size_mode: "auto"`. Clamped at paint
+     * time to the canvas height.
+     */
+    legend_height_px: number;
+
+    /**
+     * Canvas corner that `legend_x` / `legend_y` are measured FROM.
+     * Floating mode only. The panel keeps its distance to this corner
+     * across panel resizes — anchor `"bottom-right"` with small
+     * offsets stays glued to the bottom-right.
+     */
+    legend_anchor: LegendAnchor;
+
+    legend_x: number;
+    legend_y: number;
+    legend_opacity: number;
+
+    /** Per-column width cap for tooltip grid cells, in CSS pixels. */
+    tooltip_max_column_px: number;
+
+    /** Tooltip background/border alpha (0..1). */
+    tooltip_opacity: number;
 }
+
+export type LegendAnchor =
+    | "top-left"
+    | "top-right"
+    | "bottom-left"
+    | "bottom-right";
+
+export type LegendSizeMode = "auto" | "fixed";
 
 export const DEFAULT_PLUGIN_CONFIG: PluginConfig = {
     auto_alt_y_axis: false,
@@ -422,6 +553,17 @@ export const DEFAULT_PLUGIN_CONFIG: PluginConfig = {
     gradient_intensity: 0.6,
     gradient_heat_max: 4.0,
     gradient_color_mode: "mean",
-    map_tile_provider: "carto-positron",
+    map_tile_provider: TILE_SOURCES.list()[0].id,
     map_tile_alpha: 1.0,
+    numeric_axes: true,
+    legend_mode: "auto",
+    legend_size_mode: "auto",
+    legend_width_px: 0,
+    legend_height_px: 160,
+    legend_anchor: "top-right",
+    legend_x: 0,
+    legend_y: 0,
+    legend_opacity: 0.8,
+    tooltip_max_column_px: 160,
+    tooltip_opacity: 0.8,
 };

@@ -19,16 +19,18 @@ use itertools::Itertools;
 use perspective_client::config::ViewConfig;
 use yew::prelude::*;
 
+use crate::components::column_settings_sidebar::style_tab::alignment_field::AlignmentField;
+use crate::components::column_settings_sidebar::style_tab::font_field::FontField;
 use crate::components::column_settings_sidebar::style_tab::primitive_field::{
-    BoolField, ColorField, ColorRangeField, EnumField, NumberFieldPrimitive,
+    BoolField, ColorField, EnumField, NumberFieldPrimitive,
 };
-use crate::components::style::LocalStyle;
-use crate::config::ControlSpec;
-use crate::css;
+use crate::config::{Alignment, ControlSpec, FontToggle};
+use crate::presentation::Presentation;
 use crate::queries::get_plugin_config_schema;
 use crate::renderer::Renderer;
 use crate::session::Session;
 use crate::tasks::send_plugin_config;
+use crate::ui::ControlGroup;
 use crate::utils::PtrEqRc;
 
 #[derive(Clone, PartialEq, Properties)]
@@ -40,15 +42,16 @@ pub struct PluginTabProps {
     /// Active plugin's `plugin_config` bucket — threaded as a value
     /// snapshot from `RendererProps`. Changes on every mutation path
     /// that fires `plugin_config_changed` (in-tab edit,
-    /// `restore_and_render` JSON paste, `reset_all` with `all=true`)
+    /// `restore` JSON paste, `reset_all` with `all=true`)
     /// AND on plugin switch (the active bucket is keyed by plugin
     /// name, so `to_props()` produces a fresh `Rc` after
-    /// `commit_plugin_idx`). PluginTab is a pure function of this
+    /// a restore or edit commit). PluginTab is a pure function of this
     /// prop — no `Renderer::get_plugin_config()` reads against the
     /// interior-mutable handle.
     pub plugin_config: PtrEqRc<serde_json::Map<String, serde_json::Value>>,
 
     // State
+    pub presentation: Presentation,
     pub renderer: Renderer,
     pub session: Session,
 }
@@ -71,9 +74,10 @@ pub fn PluginTab(props: &PluginTabProps) -> Html {
     let schema = {
         let renderer = props.renderer.clone();
         let view_config = props.view_config.clone();
+        let plugin_config = props.plugin_config.clone();
         use_memo(
             (props.plugin_config.clone(), props.view_config.clone()),
-            move |_| match get_plugin_config_schema(&renderer, &view_config) {
+            move |_| match get_plugin_config_schema(&renderer, &view_config, Some(&plugin_config)) {
                 Ok(schema) => schema.fields,
                 Err(error) => {
                     tracing::error!("{}", error);
@@ -89,7 +93,7 @@ pub fn PluginTab(props: &PluginTabProps) -> Html {
         yew::Callback::from(move |update: crate::config::ColumnConfigFieldUpdate| {
             // `send_plugin_config` emits `plugin_config_changed`,
             // which the root component's subscription
-            // (`create_subscriptions`) turns into an `UpdateRenderer`
+            // (`create_active_subscriptions`) turns into an `UpdateRenderer`
             // dispatch carrying a fresh `RendererProps`. Yew's prop
             // diff propagates the new `plugin_config` into this
             // component automatically — no manual revision bump.
@@ -97,125 +101,185 @@ pub fn PluginTab(props: &PluginTabProps) -> Html {
         })
     };
 
-    let raw_config = &*props.plugin_config;
-    let components = schema
-        .iter()
-        .cloned()
-        .filter_map(|spec| {
-            let component = match spec {
-                ControlSpec::Enum {
-                    key,
-                    variants,
-                    default,
-                } => {
-                    let current = raw_config
-                        .get(&key)
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    html! {
-                        <EnumField
-                            field_key={key}
-                            {variants}
-                            {default}
-                            {current}
-                            on_change={on_change.clone()}
-                        />
-                    }
-                },
-                ControlSpec::Bool { key, default } => {
-                    let current = raw_config.get(&key).and_then(|v| v.as_bool());
-                    html! {
-                        <BoolField
-                            field_key={key}
-                            {default}
-                            {current}
-                            on_change={on_change.clone()}
-                        />
-                    }
-                },
-                ControlSpec::Color { key, default } => {
-                    let current = raw_config
-                        .get(&key)
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    html! {
-                        <ColorField
-                            field_key={key}
-                            {default}
-                            {current}
-                            on_change={on_change.clone()}
-                        />
-                    }
-                },
-                ControlSpec::ColorRange {
-                    key_pos,
-                    key_neg,
-                    default_pos,
-                    default_neg,
-                    is_gradient,
-                } => {
-                    let current_pos = raw_config
-                        .get(&key_pos)
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    let current_neg = raw_config
-                        .get(&key_neg)
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    html! {
-                        <ColorRangeField
-                            field_key_pos={key_pos}
-                            field_key_neg={key_neg}
-                            {default_pos}
-                            {default_neg}
-                            {current_pos}
-                            {current_neg}
-                            {is_gradient}
-                            on_change={on_change.clone()}
-                        />
-                    }
-                },
-                ControlSpec::Number {
-                    key,
-                    default,
-                    min,
-                    max,
-                    step,
-                    include,
-                } => {
-                    let current = raw_config.get(&key).and_then(|v| v.as_f64());
-                    html! {
-                        <NumberFieldPrimitive
-                            field_key={key}
-                            {default}
-                            {current}
-                            {min}
-                            {max}
-                            {step}
-                            {include}
-                            on_change={on_change.clone()}
-                        />
-                    }
-                },
-                // Column-scoped variants don't apply to
-                // plugin-level config; drop silently.
-                ControlSpec::AggregateDepth
-                | ControlSpec::NumberSeriesStyle { .. }
-                | ControlSpec::DatetimeFormat
-                | ControlSpec::StringFormat
-                | ControlSpec::Symbols { .. }
-                | ControlSpec::NumberFormat
-                | ControlSpec::String { .. } => {
-                    return None;
-                },
-            };
-
-            Some(html! { <fieldset class="style-control">{ component }</fieldset> })
+    let on_group_toggle = {
+        let presentation = props.presentation.clone();
+        yew::Callback::from(move |(key, open): (String, bool)| {
+            presentation.set_control_group_collapsed(&key, !open);
         })
-        .collect_vec();
+    };
 
+    let raw_config = &*props.plugin_config;
+    let components = render_specs(
+        &schema,
+        raw_config,
+        &on_change,
+        &props.presentation,
+        &on_group_toggle,
+    );
     html! {
         <div id="plugin-tab" class="sidebar_column scrollable">
-            <LocalStyle href={css!("column-style")} />
-            <LocalStyle href={css!("plugin-settings-panel")} />
-            <LocalStyle href={css!("containers/tabs")} />
             <div id="plugin-config-container" class="tab-section">{ components }</div>
         </div>
+    }
+}
+
+fn render_specs(
+    specs: &[ControlSpec],
+    raw_config: &serde_json::Map<String, serde_json::Value>,
+    on_change: &Callback<crate::config::ColumnConfigFieldUpdate>,
+    presentation: &Presentation,
+    on_group_toggle: &Callback<(String, bool)>,
+) -> Vec<Html> {
+    specs
+        .iter()
+        .filter_map(|spec| match spec {
+            ControlSpec::Group { key, fields } => {
+                let children =
+                    render_specs(fields, raw_config, on_change, presentation, on_group_toggle);
+
+                (!children.is_empty()).then(|| {
+                    html! {
+                        <ControlGroup
+                            key={format!("group::{key}")}
+                            group_key={key.clone()}
+                            open={!presentation.is_control_group_collapsed(key)}
+                            on_toggle={on_group_toggle.clone()}
+                        >
+                            { children }
+                        </ControlGroup>
+                    }
+                })
+            },
+            leaf => {
+                let key = leaf.serialized_keys().join("+");
+                let component = render_leaf(leaf, raw_config, on_change)?;
+                Some(html! { <fieldset class="style-control" {key}>{ component }</fieldset> })
+            },
+        })
+        .collect_vec()
+}
+
+fn render_leaf(
+    spec: &ControlSpec,
+    raw_config: &serde_json::Map<String, serde_json::Value>,
+    on_change: &Callback<crate::config::ColumnConfigFieldUpdate>,
+) -> Option<Html> {
+    match spec.clone() {
+        ControlSpec::Enum {
+            key,
+            variants,
+            default,
+        } => {
+            let current = raw_config
+                .get(&key)
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            Some(html! {
+                <EnumField
+                    field_key={key}
+                    {variants}
+                    {default}
+                    {current}
+                    on_change={on_change.clone()}
+                />
+            })
+        },
+        ControlSpec::Font {
+            key,
+            default,
+            size,
+            bold,
+            italic,
+        } => {
+            let current = raw_config
+                .get(&key)
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            let toggle = |t: &FontToggle| raw_config.get(&t.key).and_then(|v| v.as_bool());
+            let size_current = size
+                .as_ref()
+                .and_then(|s| raw_config.get(&s.key))
+                .and_then(|v| v.as_f64());
+            let bold_current = bold.as_ref().and_then(toggle);
+            let italic_current = italic.as_ref().and_then(toggle);
+            Some(html! {
+                <FontField
+                    field_key={key}
+                    {default}
+                    {current}
+                    {size}
+                    {size_current}
+                    {bold}
+                    {bold_current}
+                    {italic}
+                    {italic_current}
+                    on_change={on_change.clone()}
+                />
+            })
+        },
+        ControlSpec::Alignment {
+            key,
+            default,
+            corners,
+        } => {
+            let current = raw_config
+                .get(&key)
+                .and_then(|v| v.as_str())
+                .and_then(Alignment::parse);
+
+            Some(html! {
+                <AlignmentField
+                    field_key={key}
+                    {default}
+                    {corners}
+                    {current}
+                    on_change={on_change.clone()}
+                />
+            })
+        },
+        ControlSpec::Bool { key, default } => {
+            let current = raw_config.get(&key).and_then(|v| v.as_bool());
+            Some(html! {
+                <BoolField field_key={key} {default} {current} on_change={on_change.clone()} />
+            })
+        },
+        ControlSpec::Color { key, default } => {
+            let current = raw_config
+                .get(&key)
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            Some(html! {
+                <ColorField field_key={key} {default} {current} on_change={on_change.clone()} />
+            })
+        },
+        ControlSpec::Number {
+            key,
+            default,
+            min,
+            max,
+            step,
+            include,
+            ..
+        } => {
+            let current = raw_config.get(&key).and_then(|v| v.as_f64());
+            Some(html! {
+                <NumberFieldPrimitive
+                    field_key={key}
+                    {default}
+                    {current}
+                    {min}
+                    {max}
+                    {step}
+                    {include}
+                    on_change={on_change.clone()}
+                />
+            })
+        },
+        ControlSpec::Group { .. }
+        | ControlSpec::AggregateDepth
+        | ControlSpec::NumberSeriesStyle { .. }
+        | ControlSpec::DatetimeFormat { .. }
+        | ControlSpec::Symbols { .. }
+        | ControlSpec::NumberFormat { .. }
+        | ControlSpec::String { .. }
+        | ControlSpec::Palette { .. }
+        | ControlSpec::GradientStops { .. } => None,
     }
 }

@@ -17,27 +17,41 @@
 //! reference other `crate::utils` modules when it helps reduce boiler-plate.
 
 mod browser;
+mod completion;
+mod css;
+mod css_vars;
 mod custom_element;
 mod datetime;
 mod debounce;
 mod hooks;
+mod in_flight;
+mod local_fonts;
 mod modal_position;
 mod number_format;
+mod pending_effects;
 mod ptr_eq_rc;
 mod pubsub;
+mod spawn;
 mod weak_scope;
 
 #[cfg(test)]
 mod tests;
 
 pub use browser::*;
+pub use completion::*;
+pub use css::*;
+pub use css_vars::*;
 pub use custom_element::*;
 pub use datetime::*;
 pub use debounce::*;
 pub use hooks::*;
+pub use in_flight::*;
+pub use local_fonts::*;
 pub use modal_position::*;
 pub use number_format::*;
+pub use pending_effects::*;
 pub use perspective_client::clone;
 pub use ptr_eq_rc::*;
 pub use pubsub::*;
+pub use spawn::*;
 pub use weak_scope::*;

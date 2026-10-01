@@ -286,6 +286,18 @@ export interface SeriesPipelineInput {
     includeZero: boolean;
 
     /**
+     * `facet_mode: "grid"` geometry: key the stack ladder by
+     * `(catIdx, aggIdx, splitIdx)` instead of `(catIdx, aggIdx)`, so
+     * splits never stack on each other — each facet's bars / areas
+     * grow from their own zero baseline. Slot geometry (`xCenter` /
+     * `halfWidth`) is unchanged: facets separate splits by projection
+     * + scissor, not by X offset, so every split's records share the
+     * same band-slot coordinates. Value extents still accumulate
+     * across ALL splits — the facet grid renders a shared value axis.
+     */
+    facetSplits?: boolean;
+
+    /**
      * Reusable scratch — pipeline writes records into these in place
      * and zero-fills the stack ladder. Pass the previous build's
      * outputs to amortize allocation across data reloads.
@@ -324,6 +336,14 @@ export interface SeriesPipelineResult {
      * is the position. Indexed by `catIdx` (0..numCategories-1).
      */
     categoryPositions: Float64Array | null;
+
+    /**
+     * One entry per (aggregate × split), in `k * P + p` order. INVARIANT:
+     * `series.length === aggregates.length * splitPrefixes.length` —
+     * consumers index `series[k * P]` directly (glyph runs, the
+     * `domain_mode: "expand"` axis signature), so an empty `series` MUST
+     * be paired with empty `aggregates` / `splitPrefixes`.
+     */
     series: SeriesInfo[];
 
     /**
@@ -404,6 +424,7 @@ export function buildSeriesPipeline(
         bandInnerFrac,
         barInnerPad,
         includeZero,
+        facetSplits,
         scratchBars,
         scratchPosStack,
         scratchNegStack,
@@ -460,13 +481,18 @@ export function buildSeriesPipeline(
         numRows,
         groupBy.length,
         levelTypes,
+        axisMode,
     );
 
     if (numCategories === 0) {
+        // NOT `aggregates` / `splitPrefixes`: `series` is empty here, and
+        // carrying the non-empty lists would break the `series.length ===
+        // M * P` invariant — `series[k * P]` consumers then read
+        // `undefined` (the `loadAndRender failed … reading 'axis'` crash).
+        // Same shape as the `aggregates.length === 0` return above, which
+        // every downstream path already renders as an empty chart.
         return {
             ...empty,
-            aggregates,
-            splitPrefixes,
             rowPaths,
             rowOffset,
         };
@@ -529,9 +555,12 @@ export function buildSeriesPipeline(
     const N = numCategories;
     const S = series.length;
 
-    // Stacking ladder, keyed by (catIdx, aggIdx). Reuse chart-owned
+    // Stacking ladder, keyed by (catIdx, aggIdx) — or per-split
+    // (catIdx, aggIdx, splitIdx) in facet-grid mode, where each split
+    // renders in its own facet and cross-split stacking would lift
+    // every facet after the first off its baseline. Reuse chart-owned
     // scratch when sized; else allocate. Active prefix is zero-filled.
-    const stackLen = N * M;
+    const stackLen = facetSplits ? N * M * P : N * M;
     const posStack = ensureFloat64Scratch(scratchPosStack ?? null, stackLen);
     const negStack = ensureFloat64Scratch(scratchNegStack ?? null, stackLen);
     posStack.fill(0, 0, stackLen);
@@ -922,7 +951,9 @@ export function buildSeriesPipeline(
                         }
                     }
 
-                    const stackIdx = catI * M + k;
+                    const stackIdx = facetSplits
+                        ? (catI * M + k) * P + p
+                        : catI * M + k;
                     let y0: number;
                     let y1: number;
                     if (v >= 0) {

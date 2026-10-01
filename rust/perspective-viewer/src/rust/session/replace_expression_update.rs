@@ -126,6 +126,8 @@ pub impl ViewConfig {
             filter_op: None,
             group_by_depth: None,
             group_rollup_mode: None,
+            split_rollup_mode: None,
+            windows: None,
         }
     }
 }

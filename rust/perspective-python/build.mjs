@@ -29,8 +29,10 @@ if (!!process.env.PSP_DEBUG) {
     flags = "";
 }
 
-const python_version = process.env.PSP_PYTHON_VERSION || "3.12";
 const is_pyodide = !!process.env.PSP_PYODIDE;
+
+const python_version =
+    process.env.PSP_PYTHON_VERSION || (is_pyodide ? "3.14" : "3.12");
 
 const version = pkg.version;
 
@@ -43,10 +45,12 @@ const env = { ...process.env };
 let emsdk_prefix = "";
 if (is_pyodide) {
     const emsdkdir = path.resolve(__dirname, "../../.emsdk");
-    const { emscripten } = JSON.parse(
+    const { pyodide_emscripten } = JSON.parse(
         fs.readFileSync(path.resolve(__dirname, "../../package.json")),
     );
-    emsdk_prefix = `cd ${emsdkdir} && . ./emsdk_env.sh && ./emsdk activate ${emscripten} && cd ${cwd} && `;
+    emsdk_prefix = `cd ${emsdkdir} && . ./emsdk_env.sh && ./emsdk activate ${pyodide_emscripten} && cd ${cwd} && `;
+    env.MATURIN_PYEMSCRIPTEN_PLATFORM_VERSION =
+        process.env.MATURIN_PYEMSCRIPTEN_PLATFORM_VERSION || "2026_0";
 }
 
 // if not windows
@@ -99,7 +103,10 @@ if (build_wheel) {
         features.push(...standard_features);
     }
 
-    execSync(`${emsdk_prefix}maturin build ${flags} --features=${features.join(",")} ${target}`, { stdio: "inherit", env });
+    execSync(
+        `${emsdk_prefix}maturin build ${flags} --features=${features.join(",")} ${target}`,
+        { stdio: "inherit", env },
+    );
 }
 
 if (build_sdist) {
@@ -109,20 +116,30 @@ if (build_sdist) {
     const pyproject_toml = fs
         .readFileSync("./pyproject.toml")
         .toString("utf-8");
+
     const cargo = toml.parse(cargo_toml);
     const pyproject = toml.parse(pyproject_toml);
-
     const version = cargo["package"]["version"];
     const data_dir = `perspective_python-${version}.data`;
     const testfile = path.join(
         data_dir,
         "data/share/jupyter/labextensions/@perspective-dev/jupyterlab/package.json",
     );
+
     if (!fs.existsSync(testfile)) {
         throw new Error(
             "labextension is not present in data directory, please build `perspective-jupyterlab`",
         );
     }
+
+    if (
+        !fs.existsSync("perspective/widget/static/perspective-anywidget.js")
+    ) {
+        throw new Error(
+            "anywidget bundle is not present in perspective/widget/static, please build `@perspective-dev/anywidget`",
+        );
+    }
+
     const readme_md = fs.readFileSync("./README.md");
     const pkg_info = generatePkgInfo(pyproject, cargo, readme_md);
     fs.writeFileSync("./PKG-INFO", pkg_info);
@@ -188,7 +205,8 @@ function generatePkgInfo(pyproject, cargo, readme_md) {
     for (const extra of Object.keys(project["optional-dependencies"])) {
         addField("Provides-Extra", extra);
     }
-    addField("Summary", cargo.package.description);
+    addField("Summary", project.description);
+    addField("Keywords", project.keywords.join(","));
     addField("Home-page", cargo.package.homepage);
     addField("Author", cargo.package.authors[0]);
     addField("Author-email", cargo.package.authors[0]);
@@ -198,7 +216,10 @@ function generatePkgInfo(pyproject, cargo, readme_md) {
         "Description-Content-Type",
         "text/markdown; charset=UTF-8; variant=GFM",
     );
-    addField("Project-URL", `Source Code, ${cargo.package.repository}`);
+    for (const [label, url] of Object.entries(project.urls)) {
+        addField("Project-URL", `${label}, ${url}`);
+    }
+
     lines.push("");
     lines.push(readme_md);
 

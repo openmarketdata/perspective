@@ -498,6 +498,102 @@ const datetime_data_local = [
             });
         });
 
+        test.describe("negated string ops", function () {
+            const string_data = [
+                { x: "Cat" },
+                { x: "cathedral" },
+                { x: "dog" },
+                { x: null },
+            ];
+
+            test("x not contains 'at' excludes matches and nulls", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "not contains", "at"]],
+                });
+                expect(await view.to_columns()).toEqual({ x: ["dog"] });
+                view.delete();
+                table.delete();
+            });
+
+            test("x not begins with 'cat' is case-insensitive", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "not begins with", "cat"]],
+                });
+                expect(await view.to_columns()).toEqual({ x: ["dog"] });
+                view.delete();
+                table.delete();
+            });
+
+            test("x not ends with 'at'", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "not ends with", "at"]],
+                });
+                expect(await view.to_columns()).toEqual({
+                    x: ["cathedral", "dog"],
+                });
+                view.delete();
+                table.delete();
+            });
+        });
+
+        test.describe("matches", function () {
+            const string_data = [
+                { x: "Cat" },
+                { x: "cathedral" },
+                { x: "dog" },
+                { x: null },
+            ];
+
+            test("x matches '^ca' is a case-sensitive partial match", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "matches", "^ca"]],
+                });
+                expect(await view.to_columns()).toEqual({ x: ["cathedral"] });
+                view.delete();
+                table.delete();
+            });
+
+            test("x matches character class", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "matches", "d[aeiou]g"]],
+                });
+                expect(await view.to_columns()).toEqual({ x: ["dog"] });
+                view.delete();
+                table.delete();
+            });
+
+            test("x not matches 'at' excludes matches and nulls", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "not matches", "at"]],
+                });
+                expect(await view.to_columns()).toEqual({ x: ["dog"] });
+                view.delete();
+                table.delete();
+            });
+
+            test("an invalid pattern matches nothing for both ops", async function () {
+                const table = await perspective.table(string_data);
+                const view = await table.view({
+                    filter: [["x", "matches", "["]],
+                });
+                expect(await view.to_json()).toEqual([]);
+                view.delete();
+
+                const view2 = await table.view({
+                    filter: [["x", "not matches", "["]],
+                });
+                expect(await view2.to_json()).toEqual([]);
+                view2.delete();
+                table.delete();
+            });
+        });
+
         test.describe("Arrow types", function () {
             // https://github.com/perspective-dev/perspective/issues/2881
             test("Arrow float32 filters", async function () {
@@ -523,6 +619,7 @@ const datetime_data_local = [
                     sort: [],
                     split_by: [],
                     group_rollup_mode: "rollup",
+                    split_rollup_mode: "flat",
                 });
 
                 view.delete();
@@ -729,6 +826,52 @@ const datetime_data_local = [
                 view.delete();
                 table.delete();
             });
+        });
+
+        test.describe("== null", function () {
+            for (const type of ["integer", "float"]) {
+                test(`does not match 0 for ${type} column`, async function () {
+                    const table = await perspective.table({
+                        x: "integer",
+                        y: type,
+                    });
+
+                    await table.update([
+                        { x: 1, y: 0 },
+                        { x: 2, y: null },
+                        { x: 3, y: 1 },
+                    ]);
+
+                    const view = await table.view({
+                        filter: [["y", "==", null]],
+                    });
+
+                    expect(await view.to_json()).toEqual([]);
+                    view.delete();
+                    table.delete();
+                });
+
+                test(`in does not match 0 for a null ${type} term`, async function () {
+                    const table = await perspective.table({
+                        x: "integer",
+                        y: type,
+                    });
+
+                    await table.update([
+                        { x: 1, y: 0 },
+                        { x: 2, y: null },
+                        { x: 3, y: 1 },
+                    ]);
+
+                    const view = await table.view({
+                        filter: [["y", "in", [1, null]]],
+                    });
+
+                    expect(await view.to_json()).toEqual([{ x: 3, y: 1 }]);
+                    view.delete();
+                    table.delete();
+                });
+            }
         });
 
         test.describe("nulls", function () {

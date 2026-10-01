@@ -1,0 +1,386 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+//! Presize/resize sweeps over the [`Workspace`]'s visible panels, plus the DOM
+//! geometry measurements they (and `MainPanel`'s `before-resize` presize)
+//! depend on. These implement the presize-everywhere architecture: every
+//! geometry change renders each plugin at its *target* box before the layout
+//! commits, so content never lags its container.
+
+use std::future::Future;
+
+use futures::channel::oneshot::channel;
+use futures::future::join_all;
+use perspective_js::utils::*;
+use wasm_bindgen::JsCast;
+
+use crate::workspace::Workspace;
+
+/// Resize every *visible* panel's plugin to its current cell box, concurrently.
+/// Used after a layout change that does NOT emit `regular-layout-before-resize`
+/// — settings-panel toggle (the outer SplitPanel) and maximize/minimize — so
+/// the per-panel `ResizeObserver` (now scoped to drags) isn't needed to catch
+/// them. Hidden panels (e.g. an unselected stacked tab → null `offset_parent`)
+/// are skipped; they resize when revealed. `resize()` debounces per renderer.
+pub async fn resize_visible_panels(workspace: &Workspace) {
+    let panels = workspace
+        .panels()
+        .into_iter()
+        .filter(|panel| {
+            // `offset_parent` is `None` for a `display:none` cell.
+            panel
+                .renderer
+                .active_plugin()
+                .and_then(|plugin| {
+                    plugin
+                        .unchecked_ref::<web_sys::HtmlElement>()
+                        .offset_parent()
+                })
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+
+    join_all(panels.iter().map(|p| p.renderer.resize())).await;
+}
+
+/// The present closures collected from a presize sweep — the deferred
+/// "reveal" half of the staged-presize protocol
+/// ([`crate::renderer::Renderer::presize_with_dimensions`]). Call
+/// [`Self::reveal`] in the same task as the layout commit the sweep
+/// anticipated, so every panel's staged pixels and the geometry change
+/// reach the screen in a single paint. The reveal runs through `Drop`, so
+/// an error or early-return path between sweep and commit releases every
+/// hold instead of stranding the displays — the pairing invariant is
+/// carried by the value, not by convention.
+#[derive(Default)]
+pub struct StagedPresents(Vec<js_sys::Function>);
+
+impl StagedPresents {
+    /// Reveal every staged frame now (a semantically-named drop; the
+    /// closures are lock-free blits, safe in any task).
+    pub fn reveal(self) {}
+}
+
+impl From<Vec<js_sys::Function>> for StagedPresents {
+    fn from(presents: Vec<js_sys::Function>) -> Self {
+        Self(presents)
+    }
+}
+
+impl Drop for StagedPresents {
+    fn drop(&mut self) {
+        for f in self.0.drain(..) {
+            let _ = f.call0(&wasm_bindgen::JsValue::NULL);
+        }
+    }
+}
+
+/// The `(width, height)` factors each plugin's cell grows by when the settings
+/// pane collapses. The plugin area (`#main_panel_container`) grows to the full
+/// `#layout_area` width (the side settings pane is gone) AND to the full
+/// `#main_column` height — because the status bar switches to
+/// `position:absolute` when settings closes (see `status-bar.css`) and no
+/// longer consumes column height. Each factor defaults to `1.0` if it can't be
+/// measured.
+fn settings_close_grow_ratios(elem: &web_sys::HtmlElement) -> (f64, f64) {
+    let measure = |sel: &str| -> Option<web_sys::DomRect> {
+        elem.shadow_root()?
+            .query_selector(sel)
+            .ok()?
+            .map(|e| e.get_bounding_client_rect())
+    };
+
+    fn ratio(full: Option<f64>, current: Option<f64>) -> f64 {
+        match (full, current) {
+            (Some(f), Some(c)) if c > 0.0 && f > c => f / c,
+            _ => 1.0,
+        }
+    }
+
+    let mpc = measure("#main_panel_container");
+    let width = ratio(
+        measure("#layout_area").map(|r| r.width()),
+        mpc.as_ref().map(|r| r.width()),
+    );
+    let height = ratio(
+        measure("#main_column").map(|r| r.height()),
+        mpc.as_ref().map(|r| r.height()),
+    );
+    (width, height)
+}
+
+/// Pre-size each visible plugin to its GROWN post-close cell *before* the
+/// settings pane collapses, so the pane collapses into an already-correct
+/// plugin — one clean resize instead of grow-then-resize. The cell grows in
+/// BOTH width (the side settings pane is gone) and height (the status bar goes
+/// floating).
+pub async fn presize_visible_panels_grown(
+    workspace: &Workspace,
+    elem: &web_sys::HtmlElement,
+) -> StagedPresents {
+    let (width_ratio, height_ratio) = settings_close_grow_ratios(elem);
+    presize_visible_panels_scaled(workspace, elem, width_ratio, height_ratio).await
+}
+
+/// Pre-size each visible plugin to its cell SHRUNK by `(delta_w, delta_h)` —
+/// GROWN when a delta is negative — *before* the layout change commits. Used
+/// by the settings-pane open (P2, deltas `(layout_area.w − mpc.w,
+/// main_column.h − mpc.h)` cached at the last close — the pane and divider
+/// width and the docked status-bar height, both stable across a close/open
+/// cycle since the pane width persists in the override) and by the
+/// column-settings pin toggle and docked-drawer mount/unmount (signed delta
+/// measured live at toggle time).
+pub async fn presize_visible_panels_open(
+    workspace: &Workspace,
+    elem: &web_sys::HtmlElement,
+    delta_w: f64,
+    delta_h: f64,
+) -> StagedPresents {
+    let Some(mpc) = shadow_rect(elem, "#main_panel_container") else {
+        return StagedPresents::default();
+    };
+
+    let (mpc_w0, mpc_h0) = (mpc.width(), mpc.height());
+    if mpc_w0 <= 0.0 || mpc_h0 <= 0.0 {
+        return StagedPresents::default();
+    }
+
+    let width_ratio = (mpc_w0 - delta_w) / mpc_w0;
+    let height_ratio = (mpc_h0 - delta_h) / mpc_h0;
+    presize_visible_panels_scaled(workspace, elem, width_ratio, height_ratio).await
+}
+
+/// Pre-size each visible plugin for a proposed settings-pane width (P1, the
+/// deferred divider's pump). The grid distributes width proportionally, so the
+/// target cells scale by the container's width ratio, derived arithmetically:
+/// `mpc₁ = mpc₀ + (pane₀ − pane₁)`. Height is unaffected by the divider.
+pub async fn presize_visible_panels_pane_width(
+    workspace: &Workspace,
+    elem: &web_sys::HtmlElement,
+    pane_sel: &str,
+    pane_width: f64,
+) -> StagedPresents {
+    let Some(mpc) = shadow_rect(elem, "#main_panel_container") else {
+        return StagedPresents::default();
+    };
+
+    let Some(pane) = shadow_rect(elem, pane_sel) else {
+        return StagedPresents::default();
+    };
+
+    let mpc_w0 = mpc.width();
+    if mpc_w0 <= 0.0 {
+        return StagedPresents::default();
+    }
+
+    let width_ratio = (mpc_w0 + (pane.width() - pane_width)) / mpc_w0;
+    presize_visible_panels_scaled(workspace, elem, width_ratio, 1.0).await
+}
+
+/// Shared presize core: render every visible plugin at its current cell box
+/// scaled by `(width_ratio, height_ratio)` (track space), before the container
+/// change those ratios anticipate.
+async fn presize_visible_panels_scaled(
+    workspace: &Workspace,
+    elem: &web_sys::HtmlElement,
+    width_ratio: f64,
+    height_ratio: f64,
+) -> StagedPresents {
+    if !width_ratio.is_finite()
+        || !height_ratio.is_finite()
+        || width_ratio <= 0.0
+        || height_ratio <= 0.0
+    {
+        return StagedPresents::default();
+    }
+
+    let mpc = shadow_rect(elem, "#main_panel_container");
+    let mut last_chrome: Option<(f64, f64)> = None;
+    let targets = workspace
+        .panels()
+        .into_iter()
+        .filter_map(|panel| {
+            let plugin = panel.renderer.active_plugin()?;
+            let el = plugin.unchecked_ref::<web_sys::Element>();
+            el.unchecked_ref::<web_sys::HtmlElement>().offset_parent()?; // skip hidden
+            let plugin_box = el.get_bounding_client_rect();
+            let chrome = elem
+                .shadow_root()
+                .and_then(|r| {
+                    r.query_selector(&format!(
+                        "regular-layout-frame[name=\"{}\"]",
+                        panel.id.as_str()
+                    ))
+                    .ok()
+                    .flatten()
+                })
+                .and_then(|frame| plugin_chrome(&frame, el));
+
+            last_chrome = chrome.or(last_chrome);
+            let (cw, ch) = last_chrome.unwrap_or(super::CHROME_FALLBACK);
+
+            // Per axis, chrome can never exceed the container's
+            // non-plugin remainder: with no sibling panel on that axis,
+            // `mpc − box` IS the exact chrome, while the frame-margin
+            // measurement overcounts (margins that overlap container
+            // padding) — the source of a ~2px target miss that pushed
+            // every commit past the plugin transport's ±0.5px resize
+            // dedupe, costing an extra corrective render. With siblings
+            // the remainder is large and the measured chrome wins.
+            let (cw, ch) = match &mpc {
+                Some(mpc) => (
+                    cw.min((mpc.width() - plugin_box.width()).max(0.0)),
+                    ch.min((mpc.height() - plugin_box.height()).max(0.0)),
+                ),
+                None => (cw, ch),
+            };
+
+            let w = ((plugin_box.width() + cw) * width_ratio - cw).max(0.0);
+            let h = ((plugin_box.height() + ch) * height_ratio - ch).max(0.0);
+            Some((panel, w, h))
+        })
+        .collect::<Vec<_>>();
+
+    staged_presents_with_deadline(
+        workspace.effects().guard(),
+        async move {
+            join_all(
+                targets
+                    .iter()
+                    .map(|(p, w, h)| p.renderer.presize_with_dimensions(*w, *h)),
+            )
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok().flatten())
+            .collect()
+        },
+        || {},
+    )
+    .await
+}
+
+/// Run `work` (a presize sweep producing staged present closures) against
+/// the [`super::STAGING_DEADLINE_MS`] deadline. When `work` wins, its
+/// presents are returned for the caller to reveal in its commit task. When
+/// the deadline wins, an empty [`StagedPresents`] is returned (the caller's
+/// commit proceeds); `work` then finishes late — `late` runs its cleanup and
+/// the presents are revealed immediately, so a hold can never outlive its
+/// prepare. The single consumer makes a double release inexpressible.
+pub(crate) async fn staged_presents_with_deadline(
+    effect: crate::utils::EffectGuard,
+    work: impl Future<Output = Vec<js_sys::Function>> + 'static,
+    late: impl FnOnce() + 'static,
+) -> StagedPresents {
+    let (done, on_done) = channel::<Vec<js_sys::Function>>();
+    ApiFuture::spawn(async move {
+        let _effect = effect;
+        let presents = work.await;
+        if let Err(presents) = done.send(presents) {
+            late();
+            StagedPresents::from(presents).reveal();
+        }
+
+        Ok(())
+    });
+
+    let deadline = crate::utils::set_timeout(super::STAGING_DEADLINE_MS);
+    match futures::future::select(Box::pin(on_done), Box::pin(deadline)).await {
+        futures::future::Either::Left((Ok(presents), _)) => StagedPresents::from(presents),
+        _ => StagedPresents::default(),
+    }
+}
+
+/// Measure a shadow-DOM descendant's border-box rect.
+fn shadow_rect(elem: &web_sys::HtmlElement, sel: &str) -> Option<web_sys::DomRect> {
+    Some(
+        elem.shadow_root()?
+            .query_selector(sel)
+            .ok()??
+            .get_bounding_client_rect(),
+    )
+}
+
+/// The width the `SplitPanel` pane at `pane_sel` takes with no divider
+/// override, measured under one forced synchronous layout that no paint or
+/// `ResizeObserver` can observe, or `None` when the pane isn't in the DOM.
+pub fn measure_pane_natural_width(elem: &web_sys::HtmlElement, pane_sel: &str) -> Option<f64> {
+    let pane = elem
+        .shadow_root()?
+        .query_selector(pane_sel)
+        .ok()??
+        .dyn_into::<web_sys::HtmlElement>()
+        .ok()?;
+
+    let style = pane.style();
+    let css_text = style.css_text();
+    let class_name = pane.class_name();
+    style.set_css_text("");
+    let _ = pane.class_list().remove_1("is-width-override");
+    let width = pane.get_bounding_client_rect().width();
+    style.set_css_text(&css_text);
+    pane.set_class_name(&class_name);
+    Some(width)
+}
+
+/// The open-state geometry deltas cached for the next settings *open* (P2):
+/// `(layout_area.w − mpc.w, main_column.h − mpc.h)`. Only meaningful while the
+/// settings pane is open (i.e. measured at close time).
+pub fn measure_settings_open_deltas(elem: &web_sys::HtmlElement) -> Option<(f64, f64)> {
+    let mpc = shadow_rect(elem, "#main_panel_container")?;
+    let layout_area = shadow_rect(elem, "#layout_area")?;
+    let main_column = shadow_rect(elem, "#main_column")?;
+    Some((
+        (layout_area.width() - mpc.width()).max(0.0),
+        (main_column.height() - mpc.height()).max(0.0),
+    ))
+}
+
+/// The signed `#main_panel_container` width delta a column-settings pin
+/// toggle will cause: the docked `#modal_panel`'s flex box spans its drawer
+/// child plus the overlapping divider (`drawer.right − divider.left`, the
+/// same span in both modes since `.pinned` reparents nothing) — PINNING
+/// takes it from the main column (positive, shrink), UNPINNING releases it
+/// back (negative, grow). `None` when the drawer isn't mounted.
+pub fn measure_column_settings_pin_delta(
+    elem: &web_sys::HtmlElement,
+    is_pinned: bool,
+) -> Option<f64> {
+    let drawer = shadow_rect(elem, "#modal_panel > .split-panel-child:first-child")?;
+    let divider_left = shadow_rect(elem, "#modal_panel > .split-panel-divider")
+        .map(|r| r.left())
+        .unwrap_or_else(|| drawer.left());
+    let width = (drawer.right() - divider_left).max(0.0);
+    Some(if is_pinned { -width } else { width })
+}
+
+/// The frame chrome a plugin's grid cell has that the plugin itself doesn't
+/// occupy, as `(width, height)` px: margin + border + titlebar. Measured live
+/// from a `regular-layout-frame` and its plugin — robust to theme/CSS changes —
+/// rather than hardcoded constants. `real_coordinates` reports the grid TRACK,
+/// which equals the frame's *margin box* (`getBoundingClientRect` + margins);
+/// the plugin fills the frame's container below its titlebar, so `track −
+/// plugin` is exactly the chrome. Returns `None` if it can't be measured.
+pub fn plugin_chrome(frame: &web_sys::Element, plugin: &web_sys::Element) -> Option<(f64, f64)> {
+    let style = web_sys::window()?.get_computed_style(frame).ok()??;
+    let px = |prop: &str| {
+        style
+            .get_property_value(prop)
+            .ok()
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    let frame_box = frame.get_bounding_client_rect();
+    let plugin_box = plugin.get_bounding_client_rect();
+    let width = frame_box.width() + px("margin-left") + px("margin-right") - plugin_box.width();
+    let height = frame_box.height() + px("margin-top") + px("margin-bottom") - plugin_box.height();
+    Some((width.max(0.0), height.max(0.0)))
+}

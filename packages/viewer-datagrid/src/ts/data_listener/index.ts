@@ -12,13 +12,23 @@
 
 import { PRIVATE_PLUGIN_SYMBOL } from "../types.js";
 import { isMetaColumn } from "../model/meta_columns.js";
+import { reconcile_column_widths } from "../model/column_overrides.js";
 import { format_cell } from "./format_cell.js";
+import {
+    ColumnHeaderLabels,
+    type ColumnHeaderLabel,
+} from "./format_column_header.js";
 import {
     format_flat_header_row_path,
     format_tree_header,
     format_tree_header_row_path,
 } from "./format_tree_header.js";
-import type { DatagridModel, RegularTable, Schema } from "../types.js";
+import type {
+    ResolvedColumnsConfig,
+    DatagridModel,
+    RegularTable,
+    Schema,
+} from "../types.js";
 import type { CellScalar, DataResponse } from "regular-table/dist/esm/types.js";
 import type { ViewConfig, ViewWindow } from "@perspective-dev/client";
 import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
@@ -50,6 +60,7 @@ export function createDataListener(
     let last_ids: unknown[][] | undefined;
     let last_reverse_ids: Map<string, number> | undefined;
     let last_reverse_columns: Map<string, number> | undefined;
+    const header_labels = new ColumnHeaderLabels();
 
     return async function dataListener(
         this: DatagridModel,
@@ -115,8 +126,17 @@ export function createDataListener(
                 this._schema = { ...(a as Schema), ...(b as Schema) };
                 for (let i = 0; i < new_col_paths.length; i++) {
                     const column_path_parts = new_col_paths[i].split("|");
+
+                    // Subtotal/total columns (`split_rollup_mode: "rollup"`)
+                    // have fewer than `split_by.length` levels - the column
+                    // name is always the last part.
                     const column =
-                        column_path_parts[this._config.split_by.length];
+                        column_path_parts[
+                            Math.min(
+                                this._config.split_by.length,
+                                column_path_parts.length - 1,
+                            )
+                        ];
 
                     this._is_editable[i + new_window.start_col!] =
                         !!this._table_schema[column];
@@ -145,72 +165,21 @@ export function createDataListener(
                 return acc;
             }, new Map<string, number>());
         } else {
-            this._div_factory.clear();
             num_columns = await this._view.num_columns();
         }
 
         const data: (string | HTMLElement)[][] = [];
         const metadata: unknown[][] = [];
-        const column_headers: string[][] = [];
+        const column_headers: (string | ColumnHeaderLabel)[][] = [];
         const column_paths: string[] = [];
 
-        const is_settings_open = viewer.hasAttribute("settings");
-        for (
-            let ipath = x0;
-            ipath < Math.min(x1, this._column_paths.length);
-            ++ipath
-        ) {
-            const path = this._column_paths[ipath];
-            const path_parts = path.split("|");
-            const column = columns[path] || new Array(y1 - y0).fill(null);
-            const agg_depth = Math.min(
-                (regularTable as any)[PRIVATE_PLUGIN_SYMBOL]?.[
-                    path_parts[this._config.split_by.length]
-                ]?.aggregate_depth || 0,
-                this._config.group_by.length,
-            );
-
-            data.push(
-                column.map((x, i) => {
-                    if ((columns?.__ROW_PATH__?.[i]?.length ?? 0) < agg_depth) {
-                        return "";
-                    } else {
-                        return format_cell.call(
-                            this,
-                            path_parts[this._config.split_by.length],
-                            x,
-                            (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {},
-                        ) as string | HTMLElement;
-                    }
-                }),
-            );
-
-            metadata.push(column as unknown[]);
-            if (is_settings_open) {
-                path_parts.push("");
-            }
-
-            column_headers.push(path_parts);
-            column_paths.push(path);
-        }
+        const is_settings_open =
+            this._column_menus &&
+            viewer.hasAttribute("settings") &&
+            (this._panel === undefined ||
+                viewer.getActivePanel() === this._panel);
 
         const is_dim_call = x1 - x0 > 0 && y1 - y0 > 0;
-
-        // Only update the last state if this is not a "phantom" call.
-        if (is_dim_call) {
-            this.last_column_paths = last_column_paths;
-            this.last_meta = last_meta;
-            this.last_ids = last_ids;
-            this.last_reverse_ids = last_reverse_ids;
-            this.last_reverse_columns = last_reverse_columns;
-
-            last_column_paths = column_paths;
-            last_meta = metadata;
-            last_ids = this._ids;
-            last_reverse_ids = this._reverse_ids;
-            last_reverse_columns = this._reverse_columns;
-        }
-
         const is_row_path = columns.__ROW_PATH__ !== undefined;
         const is_flat = this._config.group_rollup_mode === "flat";
         const row_headers = Array.from(
@@ -231,6 +200,115 @@ export function createDataListener(
             ? row_header_depth(this._config)
             : row_headers[0]?.length;
 
+        this._num_row_headers = num_row_headers ?? 0;
+
+        const live_overrides = is_dim_call
+            ? reconcile_column_widths(this, regularTable, x0, x1)
+            : {};
+
+        const columns_config: ResolvedColumnsConfig =
+            (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {};
+
+        for (
+            let ipath = x0;
+            ipath < Math.min(x1, this._column_paths.length);
+            ++ipath
+        ) {
+            const path = this._column_paths[ipath];
+            const path_parts = path.split("|");
+            const n_split_levels = path_parts.length - 1;
+
+            // Under `split_rollup_mode: "rollup"`, grand-total and subtotal
+            // columns have fewer than `split_by.length` levels. Pad between
+            // the split levels and the trailing column name so the name
+            // always lands at index `split_by.length` - every downstream
+            // `column_header` consumer indexes it there.
+            //
+            // Pads are zero-width spaces repeated by group depth, NOT `""`:
+            // regular-table merges header cells on bare value equality
+            // across the whole row, so a plain `""` pad would merge with an
+            // adjacent group's equal pad - or, for the grand-total group's
+            // row-0 cell, with the blank CORNER `<th>` beside it, swallowing
+            // the column and its group-boundary border. Depth-keying makes
+            // pads equal exactly within one group - same-depth groups are
+            // never adjacent in the pre-order column space - so pads merge
+            // inside a group and never across one. The grand-total group has
+            // no real levels, so its entire header stack is pads (rendering
+            // blank).
+            if (path_parts.length < this._config.split_by.length + 1) {
+                const column_name = path_parts.pop() as string;
+                const pad = "\u200b".repeat(path_parts.length + 1);
+                while (path_parts.length < this._config.split_by.length) {
+                    path_parts.push(pad);
+                }
+
+                path_parts.push(column_name);
+            }
+
+            const column = columns[path] || new Array(y1 - y0).fill(null);
+            const column_config =
+                columns_config[path_parts[this._config.split_by.length]];
+
+            const wrap =
+                (column_config?.word_wrap ?? this._word_wrap) &&
+                live_overrides[ipath + this._num_row_headers] !== undefined;
+
+            const agg_depth = Math.min(
+                column_config?.aggregate_depth || 0,
+                this._config.group_by.length,
+            );
+
+            data.push(
+                column.map((x, i) => {
+                    if ((columns?.__ROW_PATH__?.[i]?.length ?? 0) < agg_depth) {
+                        return "";
+                    }
+
+                    const cell = format_cell.call(
+                        this,
+                        path_parts[this._config.split_by.length],
+                        x,
+                        columns_config,
+                    ) as string | HTMLElement;
+
+                    return wrap ? wrap_cell(cell) : cell;
+                }),
+            );
+
+            metadata.push(column as unknown[]);
+            const header: (string | ColumnHeaderLabel)[] = path_parts.slice();
+            for (let level = 0; level < n_split_levels; level++) {
+                header[level] = header_labels.format(
+                    this,
+                    path_parts,
+                    level,
+                    columns_config,
+                );
+            }
+
+            if (is_settings_open) {
+                header.push("");
+            }
+
+            column_headers.push(header);
+            column_paths.push(path);
+        }
+
+        // Only update the last state if this is not a "phantom" call.
+        if (is_dim_call) {
+            this.last_column_paths = last_column_paths;
+            this.last_meta = last_meta;
+            this.last_ids = last_ids;
+            this.last_reverse_ids = last_reverse_ids;
+            this.last_reverse_columns = last_reverse_columns;
+
+            last_column_paths = column_paths;
+            last_meta = metadata;
+            last_ids = this._ids;
+            last_reverse_ids = this._reverse_ids;
+            last_reverse_columns = this._reverse_columns;
+        }
+
         const result: DataResponse = {
             num_column_headers:
                 this._config.split_by.length + (is_settings_open ? 2 : 1),
@@ -238,7 +316,7 @@ export function createDataListener(
             num_rows: this._num_rows,
             num_columns,
             row_headers: row_headers as CellScalar[][], // Add `HTMLElement`
-            column_headers,
+            column_headers: column_headers as CellScalar[][],
             data: data as CellScalar[][],
             metadata,
             column_header_merge_depth: Math.max(
@@ -247,8 +325,32 @@ export function createDataListener(
             ),
         };
 
+        if (this._row_height !== undefined) {
+            result.row_height = this._row_height;
+        }
+
         return result;
     };
+}
+
+/**
+ * Box a cell's content in the block `word_wrap` clamps to the row, leaving
+ * null and blank cells bare.
+ */
+function wrap_cell(content: string | HTMLElement): string | HTMLElement {
+    if (!content) {
+        return content;
+    }
+
+    const block = document.createElement("div");
+    block.className = "psp-wrap";
+    if (content instanceof HTMLElement) {
+        block.appendChild(content);
+    } else {
+        block.textContent = content;
+    }
+
+    return block;
 }
 
 function row_header_depth(config: ViewConfig) {

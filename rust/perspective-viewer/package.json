@@ -1,19 +1,27 @@
 {
     "name": "@perspective-dev/viewer",
-    "version": "4.5.1",
-    "description": "The `<perspective-viewer>` Custom Element, frontend for Perspective",
+    "version": "5.5.1",
+    "description": "`<perspective-viewer>`, a WebAssembly-powered data grid, pivot table and charting Web Component for large, real-time and streaming datasets.",
     "keywords": [
         "perspective",
-        "data",
-        "analytics",
-        "visualization",
         "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
         "charts",
-        "web-component",
+        "visualization",
+        "dashboard",
+        "analytics",
+        "bi",
+        "streaming",
+        "real-time",
         "wasm",
-        "arrow"
+        "webassembly",
+        "arrow",
+        "web-component",
+        "custom-element"
     ],
-    "homepage": "https://perspective.finos.org",
+    "homepage": "https://perspective-dev.github.io",
     "repository": {
         "type": "git",
         "url": "https://github.com/perspective-dev/perspective"
@@ -29,10 +37,15 @@
             "import": "./dist/esm/perspective-viewer.js",
             "default": "./dist/esm/perspective-viewer.js"
         },
-        "./inline": {
-            "types": "./dist/esm/perspective-viewer.d.ts",
-            "import": "./dist/esm/perspective-viewer.inline.js",
-            "default": "./dist/esm/perspective-viewer.inline.js"
+        "./select-detail": {
+            "types": "./dist/esm/select-detail.d.ts",
+            "import": "./dist/esm/select-detail.js",
+            "default": "./dist/esm/select-detail.js"
+        },
+        "./column-format": {
+            "types": "./dist/esm/column-format.d.ts",
+            "import": "./dist/esm/column-format.js",
+            "default": "./dist/esm/column-format.js"
         },
         "./themes": "./dist/css/themes.css",
         "./themes/*.css": "./dist/css/*.css",
@@ -59,13 +72,14 @@
         "access": "public"
     },
     "dependencies": {
-        "@perspective-dev/client": "workspace:",
-        "pro_self_extracting_wasm": "catalog:"
+        "@perspective-dev/client": "workspace:^",
+        "pro_self_extracting_wasm": "catalog:",
+        "regular-layout": "catalog:"
     },
     "devDependencies": {
-        "@perspective-dev/esbuild-plugin": "workspace:",
-        "@perspective-dev/test": "workspace:",
-        "@perspective-dev/metadata": "workspace:",
+        "@perspective-dev/esbuild-plugin": "workspace:^",
+        "@perspective-dev/test": "workspace:^",
+        "@perspective-dev/metadata": "workspace:^",
         "lightningcss": "catalog:",
         "@playwright/test": "catalog:",
         "@playwright/experimental-ct-react": "catalog:",
@@ -73,6 +87,7 @@
         "@types/node": "catalog:",
         "@types/react-dom": "catalog:",
         "prettier": "catalog:",
+        "ts-json-schema-generator": "^2.4.0",
         "typedoc": "catalog:",
         "typescript": "catalog:",
         "zx": "catalog:"

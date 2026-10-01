@@ -12,9 +12,25 @@
 
 import { PRIVATE_PLUGIN_SYMBOL } from "../types.js";
 import { format_cell } from "./format_cell.js";
-import type { DatagridModel, RegularTable, ColumnsConfig } from "../types.js";
+import type {
+    DatagridModel,
+    RegularTable,
+    ResolvedColumnsConfig,
+} from "../types.js";
 
-type RowHeaderCell = string | HTMLElement | { toString(): string };
+type RowHeaderCell = string | HTMLElement | null | { toString(): string };
+
+/**
+ * The row-header cell for a group key: a `null` key and an `HTMLElement` pass
+ * through as-is, anything else renders through `toString()` as text.
+ */
+function row_header_cell(
+    formatted: string | HTMLElement | null,
+): RowHeaderCell {
+    return formatted instanceof HTMLElement || formatted === null
+        ? formatted
+        : { toString: () => String(formatted) };
+}
 
 /**
  * Format a single cell of the `group_by` tree header for __ROW_PATH__ data.
@@ -25,7 +41,7 @@ export function* format_tree_header_row_path(
     row_headers: string[],
     regularTable: RegularTable,
 ): Generator<RowHeaderCell[]> {
-    const plugins: ColumnsConfig =
+    const plugins: ResolvedColumnsConfig =
         (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {};
     for (const path of paths) {
         const fullPath: unknown[] = ["TOTAL", ...path];
@@ -41,11 +57,7 @@ export function* format_tree_header_row_path(
             true,
         );
 
-        if (formatted instanceof HTMLElement) {
-            newPath = newPath.concat(formatted);
-        } else {
-            newPath = newPath.concat({ toString: () => formatted as string });
-        }
+        newPath = newPath.concat(row_header_cell(formatted));
 
         newPath.length = row_headers.length + 1;
         yield newPath;
@@ -58,7 +70,7 @@ export function* format_flat_header_row_path(
     row_headers: string[],
     regularTable: RegularTable,
 ): Generator<RowHeaderCell[]> {
-    const plugins: ColumnsConfig =
+    const plugins: ResolvedColumnsConfig =
         (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {};
 
     for (const path of paths) {
@@ -77,7 +89,7 @@ export function* format_tree_header(
     row_headers: string[],
     regularTable: RegularTable,
 ): Generator<unknown[]> {
-    const plugins: ColumnsConfig =
+    const plugins: ResolvedColumnsConfig =
         (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {};
     for (const path of paths) {
         const new_path: unknown[] = [""];

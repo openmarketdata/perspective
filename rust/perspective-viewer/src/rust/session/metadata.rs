@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::iter::IntoIterator;
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use perspective_client::config::*;
 use perspective_js::apierror;
@@ -56,7 +57,18 @@ impl DerefMut for SessionMetadata {
     }
 }
 
-pub type MetadataRef<'a> = std::cell::Ref<'a, SessionMetadata>;
+/// An OWNED read guard over a panel's [`SessionMetadata`]: a snapshot that
+/// borrows nothing, so holding one can never make a later state write panic.
+pub struct MetadataRef(pub(super) Rc<SessionMetadata>);
+
+impl Deref for MetadataRef {
+    type Target = SessionMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 pub type MetadataMutRef<'a> = std::cell::RefMut<'a, SessionMetadata>;
 
 /// TODO the multiple `Option` types could probably be merged since they are
@@ -69,6 +81,7 @@ pub struct SessionMetadataState {
     edit_port: f64,
     view_schema: Option<HashMap<String, ColumnType>>,
     expr_meta: Option<SessionViewExpressionMetadata>,
+    window_schema: HashMap<String, ColumnType>,
 }
 
 impl SessionMetadata {
@@ -91,8 +104,53 @@ impl SessionMetadata {
         &mut self,
         view_schema: &HashMap<String, ColumnType>,
     ) -> ApiResult<()> {
-        self.as_mut().unwrap().view_schema = Some(view_schema.clone());
+        self.as_mut().ok_or("No `Table` set")?.view_schema = Some(view_schema.clone());
         Ok(())
+    }
+
+    /// Records the pre-aggregation types of the config's window columns, so
+    /// `get_column_table_type` resolves them like any other derived column.
+    pub(super) fn update_windows(
+        &mut self,
+        windows: &perspective_client::config::Windows,
+    ) -> ApiResult<()> {
+        let window_schema = windows
+            .iter()
+            .filter_map(|(name, w)| {
+                let source = self.get_column_table_type(&w.column)?;
+                let dtype = self
+                    .get_window_aggregate(source, &w.aggregate)
+                    .and_then(|spec| spec.result_type)
+                    .and_then(|ty| ColumnType::try_from(ty).ok())
+                    .unwrap_or(source);
+
+                Some((name.clone(), dtype))
+            })
+            .collect();
+        self.as_mut().ok_or("No `Table` set")?.window_schema = window_schema;
+        Ok(())
+    }
+
+    /// The declaration for one window aggregate over a `source` column type.
+    pub fn get_window_aggregate(
+        &self,
+        source: ColumnType,
+        name: &str,
+    ) -> Option<perspective_client::proto::WindowAggregateArgs> {
+        self.get_features()?
+            .get_window_aggregates(source)
+            .into_iter()
+            .find(|x| x.name == name)
+    }
+
+    /// Whether `view_schema` has been populated by a prior successful
+    /// `create_view`. Used by `Session::create_view` to force a full
+    /// build on first run even when `is_clean` happens to be true, so
+    /// that downstream consumers (`query_column_config_schema`,
+    /// strip-on-write in `update_columns_configs`) always see a real
+    /// view schema rather than `None`.
+    pub fn has_view_schema(&self) -> bool {
+        self.as_ref().and_then(|s| s.view_schema.as_ref()).is_some()
     }
 
     pub(super) fn update_expressions(
@@ -105,16 +163,11 @@ impl SessionMetadata {
             )));
         }
 
-        let mut edited = self
-            .as_mut()
-            .unwrap()
-            .expr_meta
-            .take()
-            .map(|x| x.edited)
-            .unwrap_or_default();
+        let state = self.as_mut().ok_or("No `Table` set")?;
+        let mut edited = state.expr_meta.take().map(|x| x.edited).unwrap_or_default();
 
         edited.retain(|k, _| valid_recs.expression_alias.contains_key(k));
-        self.as_mut().unwrap().expr_meta = Some(SessionViewExpressionMetadata {
+        state.expr_meta = Some(SessionViewExpressionMetadata {
             expressions: valid_recs.clone(),
             edited,
         });
@@ -141,7 +194,7 @@ impl SessionMetadata {
     }
 
     pub fn get_expression_columns(&self) -> impl Iterator<Item = &'_ String> {
-        try {
+        let mut columns = try {
             self.as_ref()?
                 .expr_meta
                 .as_ref()?
@@ -151,6 +204,10 @@ impl SessionMetadata {
         }
         .into_iter()
         .flatten()
+        .collect::<Vec<_>>();
+
+        columns.sort_unstable();
+        columns.into_iter()
     }
 
     /// Returns the full original expression `String` for an expression alias.
@@ -202,6 +259,19 @@ impl SessionMetadata {
         self.as_ref().map(|meta| &meta.column_names)
     }
 
+    pub fn is_column_window(&self, name: &str) -> bool {
+        self.as_ref()
+            .map(|meta| meta.window_schema.contains_key(name))
+            .unwrap_or_default()
+    }
+
+    pub fn get_window_columns(&self) -> impl Iterator<Item = &'_ String> {
+        self.as_ref()
+            .map(|meta| meta.window_schema.keys())
+            .into_iter()
+            .flatten()
+    }
+
     pub fn is_column_expression(&self, name: &str) -> bool {
         let is_expr: Option<bool> = try {
             self.as_ref()?
@@ -232,6 +302,12 @@ impl SessionMetadata {
         self.as_ref().map(|meta| meta.edit_port)
     }
 
+    /// The type of a column of the `Table` itself — expression and window
+    /// columns, which belong to a config, excluded.
+    pub fn get_table_schema_type(&self, name: &str) -> Option<ColumnType> {
+        self.as_ref()?.table_schema.get(name).copied()
+    }
+
     /// Returns the type of a column name relative to the `Table`.  Despite the
     /// name, `get_column_table_type()` also returns the `Table` type for
     /// Expressions, which despite living on the `View` still have a `table`
@@ -243,14 +319,18 @@ impl SessionMetadata {
     pub fn get_column_table_type(&self, name: &str) -> Option<ColumnType> {
         try {
             let meta = self.as_ref()?;
-            meta.table_schema.get(name).cloned().or_else(|| {
-                meta.expr_meta
-                    .as_ref()?
-                    .expressions
-                    .expression_schema
-                    .get(name)
-                    .cloned()
-            })?
+            meta.table_schema
+                .get(name)
+                .cloned()
+                .or_else(|| {
+                    meta.expr_meta
+                        .as_ref()?
+                        .expressions
+                        .expression_schema
+                        .get(name)
+                        .cloned()
+                })
+                .or_else(|| meta.window_schema.get(name).cloned())?
         }
     }
 
@@ -272,7 +352,9 @@ impl SessionMetadata {
     /// expressions.
     pub fn locator_name_or_default(&self, locator: &ColumnLocator) -> String {
         match locator {
-            ColumnLocator::Table(s) | ColumnLocator::Expression(s) => s.clone(),
+            ColumnLocator::Table(s) | ColumnLocator::Expression(s) | ColumnLocator::Window(s) => {
+                s.clone()
+            },
             ColumnLocator::NewExpression => self.make_new_column_name(None),
         }
     }
@@ -302,7 +384,7 @@ impl SessionMetadata {
                     Some(
                         self.get_expression_columns()
                             .cloned()
-                            .chain(self.get_table_columns()?.clone().into_iter())
+                            .chain(self.get_table_columns()?.clone())
                             .map(move |name| {
                                 self.get_column_table_type(&name)
                                     .map(|coltype| (name, coltype))

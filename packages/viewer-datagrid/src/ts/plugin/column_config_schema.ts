@@ -11,10 +11,26 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import type { ColumnType } from "@perspective-dev/client";
-import type { DatagridPluginElement } from "../types.js";
+import { colorsToCss, rgbToHex, stopsToCss } from "../color_utils.js";
+import { readThemeStyle } from "../model/create.js";
+import { measure_px, parse_align } from "./plugin_config_schema.js";
+import { positive_px } from "./restore.js";
+import {
+    bg_modes_for,
+    default_bg_mode,
+    default_fg_mode,
+    fg_modes_for,
+    parse_bg_mode,
+    parse_fg_mode,
+    type BgMode,
+    type ColumnConfig,
+    type DatagridPluginElement,
+    type FgMode,
+} from "../types.js";
 
 interface ViewerConfigLike {
     group_by?: string[];
+    split_by?: string[];
     group_rollup_mode?: string;
 }
 
@@ -27,21 +43,7 @@ export interface ColumnConfigSchema {
 /**
  * Plugin schema for the Datagrid column-settings sidebar. Returns the
  * controls the viewer should render in the Style tab for a given column.
- *
- * Each entry in `fields` is a `ControlSpec` discriminated by `kind`.
- * Composite kinds (`NumberStyle`, `DatetimeFormat`, `StringFormat`,
- * `NumberFormat`, `AggregateDepth`) own a fixed key namespace and
- * carry only their `default`. Primitive kinds (`Enum`, `Bool`, `Color`,
- * etc.) carry their own `key` (storage) and `label` (UI) inline.
- *
- * Aggregate Depth is plugin-owned — surfaced only inside the Datagrid
- * because rollup-mode pivots are a Datagrid concern. Emitted only when
- * the active view has a non-empty `group_by` and rollup mode is `Rollup`.
  */
-interface ColumnStats {
-    abs_max?: number;
-}
-
 export default function column_config_schema(
     this: DatagridPluginElement,
     type: ColumnType,
@@ -49,130 +51,46 @@ export default function column_config_schema(
     _column_name: string,
     current_value: Record<string, unknown> | null,
     viewer_config?: ViewerConfigLike,
-    column_stats?: ColumnStats,
+    plugin_config?: Record<string, unknown> | null,
 ): ColumnConfigSchema {
+    const grid =
+        plugin_config === undefined || plugin_config === null
+            ? {
+                  font_family: this._font_family,
+                  font_size: this._font_size,
+                  bold: this._bold,
+                  italic: this._italic,
+                  align: this._align,
+                  word_wrap: this._word_wrap,
+              }
+            : {
+                  font_family:
+                      typeof plugin_config.font_family === "string"
+                          ? plugin_config.font_family
+                          : undefined,
+                  font_size: positive_px(plugin_config.font_size),
+                  bold: plugin_config.bold === true,
+                  italic: plugin_config.italic === true,
+                  align: parse_align(plugin_config.align),
+                  word_wrap: plugin_config.word_wrap === true,
+              };
+
     const fields: ControlSpec[] = [];
+    const group: ControlSpec & { fields: ControlSpec[] } = {
+        kind: "Group",
+        key: "column",
+        fields: [],
+    };
 
-    if (type === "integer" || type === "float") {
-        const pos_fg = this.model!._pos_fg_color[0];
-        const neg_fg = this.model!._neg_fg_color[0];
-        const pos_bg = this.model!._pos_bg_color[0];
-        const neg_bg = this.model!._neg_bg_color[0];
+    fields.push(group);
 
-        fields.push({
-            kind: "Enum",
-            key: "number_fg_mode",
-            default: "color",
-            variants: [
-                { value: "disabled", label: "Disabled" },
-                { value: "color", label: "Color" },
-                { value: "bar", label: "Bar" },
-                { value: "label-bar", label: "Gradient" },
-            ],
+    if ((viewer_config?.split_by?.length ?? 0) === 0) {
+        group.fields.push({
+            kind: "Number",
+            key: "column_size_override" satisfies keyof ColumnConfig,
+            default: 0,
+            min: 1,
         });
-
-        const fg_mode = (current_value?.number_fg_mode as string) ?? "color";
-        if (fg_mode !== "disabled") {
-            fields.push({
-                kind: "ColorRange",
-                key_pos: "pos_fg_color",
-                key_neg: "neg_fg_color",
-                default_pos: pos_fg,
-                default_neg: neg_fg,
-                is_gradient: false,
-            });
-        }
-
-        if (fg_mode === "bar" || fg_mode === "label-bar") {
-            fields.push({
-                kind: "Number",
-                key: "fg_gradient",
-                default: column_stats?.abs_max ?? 0,
-                include: true,
-            });
-        }
-
-        fields.push({
-            kind: "Enum",
-            key: "number_bg_mode",
-            default: "disabled",
-            variants: [
-                { value: "disabled", label: "Disabled" },
-                { value: "color", label: "Color" },
-                { value: "gradient", label: "Gradient" },
-                { value: "pulse", label: "Pulse" },
-            ],
-        });
-
-        const bg_mode = (current_value?.number_bg_mode as string) ?? "disabled";
-        if (bg_mode !== "disabled") {
-            fields.push({
-                kind: "ColorRange",
-                key_pos: "pos_bg_color",
-                key_neg: "neg_bg_color",
-                default_pos: pos_bg,
-                default_neg: neg_bg,
-                is_gradient: bg_mode === "gradient" || bg_mode === "pulse",
-            });
-        }
-
-        if (bg_mode === "gradient") {
-            fields.push({
-                kind: "Number",
-                key: "bg_gradient",
-                include: true,
-                default: column_stats?.abs_max ?? 0,
-            });
-        }
-
-        fields.push({ kind: "NumberFormat" });
-    } else if (type === "date" || type === "datetime") {
-        fields.push({ kind: "DatetimeFormat" });
-
-        fields.push({
-            kind: "Enum",
-            key: "datetime_color_mode",
-            default: "none",
-            variants: [
-                { value: "none", label: "None" },
-                { value: "foreground", label: "Foreground" },
-                { value: "background", label: "Background" },
-            ],
-        });
-
-        const dt_mode =
-            (current_value?.datetime_color_mode as string) ?? "none";
-
-        if (dt_mode !== "none") {
-            fields.push({
-                kind: "Color",
-                key: "color",
-                default: this.model!._color[0],
-            });
-        }
-    } else if (type === "string") {
-        fields.push({ kind: "StringFormat" });
-
-        fields.push({
-            kind: "Enum",
-            key: "string_color_mode",
-            default: "none",
-            variants: [
-                { value: "none", label: "None" },
-                { value: "foreground", label: "Foreground" },
-                { value: "background", label: "Background" },
-                { value: "series", label: "Series" },
-            ],
-        });
-
-        const str_mode = (current_value?.string_color_mode as string) ?? "none";
-        if (str_mode !== "none") {
-            fields.push({
-                kind: "Color",
-                key: "color",
-                default: this.model!._color[0],
-            });
-        }
     }
 
     const group_by = viewer_config?.group_by ?? [];
@@ -180,8 +98,184 @@ export default function column_config_schema(
         (viewer_config?.group_rollup_mode ?? "rollup") === "rollup";
 
     if (group_by.length > 0 && is_rollup) {
-        fields.push({ kind: "AggregateDepth" });
+        group.fields.push({ kind: "AggregateDepth" });
+    }
+
+    fields.push({
+        kind: "Group",
+        key: "font",
+        fields: [
+            {
+                kind: "Font",
+                key: "font_family" satisfies keyof ColumnConfig,
+                default: grid.font_family ?? "inherit",
+                size: {
+                    key: "font_size" satisfies keyof ColumnConfig,
+                    default:
+                        grid.font_size ?? measure_px(this, "font-size", 12),
+                    min: 4,
+                    max: 96,
+                    step: 1,
+                },
+                bold: {
+                    key: "bold" satisfies keyof ColumnConfig,
+                    default: grid.bold,
+                },
+                italic: {
+                    key: "italic" satisfies keyof ColumnConfig,
+                    default: grid.italic,
+                },
+            },
+            {
+                kind: "Alignment",
+                key: "align" satisfies keyof ColumnConfig,
+                ...(grid.align !== undefined ? { default: grid.align } : {}),
+            },
+            {
+                kind: "Bool",
+                key: "word_wrap" satisfies keyof ColumnConfig,
+                default: grid.word_wrap,
+            },
+        ],
+    });
+
+    const fg_modes = fg_modes_for(type);
+    const bg_modes = bg_modes_for(type);
+    if (fg_modes.length > 0 || bg_modes.length > 0) {
+        const fg_mode =
+            parse_fg_mode(type, current_value?.fg_mode) ??
+            default_fg_mode(type);
+
+        const bg_mode =
+            parse_bg_mode(type, current_value?.bg_mode) ??
+            default_bg_mode(type);
+
+        const color_fields: ControlSpec[] = [
+            mode_spec("fg_mode", fg_modes, default_fg_mode(type)),
+            ...value_specs.call(this, type, "fg", fg_mode),
+            mode_spec("bg_mode", bg_modes, default_bg_mode(type)),
+            ...value_specs.call(this, type, "bg", bg_mode),
+        ];
+
+        fields.push({ kind: "Group", key: "color", fields: color_fields });
+    }
+
+    if (type === "integer" || type === "float") {
+        fields.push({ kind: "NumberFormat" });
+    } else if (type === "date" || type === "datetime") {
+        fields.push({ kind: "DatetimeFormat" });
+    } else if (type === "string") {
+        fields.push({
+            kind: "Bool",
+            key: "link" satisfies keyof ColumnConfig,
+            default: false,
+        });
     }
 
     return { fields };
+}
+
+const MODE_LABELS: Record<FgMode | BgMode, string> = {
+    disabled: "Disabled",
+    color: "Color",
+    bar: "Bar",
+    "label-bar": "Gradient",
+    gradient: "Gradient",
+    pulse: "Pulse",
+    series: "Series",
+};
+
+/** The `Enum` control for `fg_mode` / `bg_mode` over a type's modes. */
+function mode_spec(
+    key: "fg_mode" | "bg_mode",
+    modes: readonly (FgMode | BgMode)[],
+    default_mode: FgMode | BgMode,
+): ControlSpec {
+    return {
+        kind: "Enum",
+        key: key satisfies keyof ColumnConfig,
+        default: default_mode,
+        variants: modes.map((value) => ({ value, label: MODE_LABELS[value] })),
+    };
+}
+
+/**
+ * The controls a foreground or background `mode` gates in for a column of
+ * `type`: the `fg_color` / `bg_color` value control in the grammar the
+ * (type, mode) pair reads - gradient stops for numbers, a color for
+ * string / datetime `"color"`, a palette for string `"series"` - plus the
+ * numeric scale extent. Nothing for `"disabled"`.
+ */
+function value_specs(
+    this: DatagridPluginElement,
+    type: ColumnType,
+    side: "fg" | "bg",
+    mode: FgMode | BgMode,
+): ControlSpec[] {
+    if (mode === "disabled") {
+        return [];
+    }
+
+    const theme = this.model ?? readThemeStyle(this.regular_table);
+
+    const key = `${side}_color` satisfies keyof ColumnConfig;
+    if (type === "integer" || type === "float") {
+        const pos = theme[`_pos_${side}_color`][0];
+        const neg = theme[`_neg_${side}_color`][0];
+        const stops: ControlSpec =
+            mode === "gradient" || mode === "pulse"
+                ? {
+                      kind: "GradientStops",
+                      key,
+                      default: stopsToCss([
+                          { color: neg, offset: 0 },
+                          {
+                              color: rgbToHex(
+                                  theme._plugin_background as [
+                                      number,
+                                      number,
+                                      number,
+                                  ],
+                              ),
+                              offset: 0.5,
+                          },
+                          { color: pos, offset: 1 },
+                      ]),
+                  }
+                : {
+                      kind: "GradientStops",
+                      key,
+                      default: stopsToCss([
+                          { color: neg, offset: 0 },
+                          { color: pos, offset: 1 },
+                      ]),
+                      discrete: true,
+                  };
+
+        const scaled =
+            mode === "bar" || mode === "label-bar" || mode === "gradient";
+
+        return scaled
+            ? [
+                  stops,
+                  {
+                      kind: "Number",
+                      key: `${side}_gradient` satisfies keyof ColumnConfig,
+                      include: true,
+                      default: 0,
+                      default_stat: "abs_max",
+                  },
+              ]
+            : [stops];
+    } else if (mode === "series") {
+        return [
+            {
+                kind: "Palette",
+                key,
+                default: colorsToCss(theme._series_palette),
+            },
+        ];
+    } else {
+        return [{ kind: "Color", key, default: theme._color[0] }];
+    }
 }

@@ -21,12 +21,11 @@ use yew::html::ImplicitClone;
 use yew::prelude::*;
 
 use super::column_selector::InPlaceColumn;
-use super::portal::PortalModal;
+use super::style::StyleSurface;
 use crate::session::Session;
+use crate::ui::PortalModal;
 use crate::utils::*;
 use crate::*;
-
-static CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/css/column-dropdown.css"));
 
 /// Shared state for the column dropdown, updated imperatively.
 #[derive(Default)]
@@ -71,50 +70,60 @@ impl ColumnDropDownElement {
         callback: Callback<InPlaceColumn>,
     ) -> Option<()> {
         let input = target.value();
-        let metadata = self.session.metadata();
-        let mut values: Vec<InPlaceColumn> = vec![];
         let small_input = input.to_lowercase();
-        for col in metadata.get_table_columns()? {
-            if !exclude.contains(col) && col.to_lowercase().contains(&small_input) {
-                values.push(InPlaceColumn::Column(col.to_owned()));
-            }
-        }
-
-        for col in self.session.metadata().get_expression_columns() {
-            if !exclude.contains(col) && col.to_lowercase().contains(&small_input) {
-                values.push(InPlaceColumn::Column(col.to_owned()));
-            }
-        }
-
-        clone!(self.state, self.session, self.notify);
-        let target_elem: HtmlElement = target.clone().into();
-        let width = target.get_bounding_client_rect().width();
-        ApiFuture::spawn(async move {
-            if !exclude.contains(&input) {
-                let is_expr = crate::queries::validate_expr(&session, &input)
-                    .await?
-                    .is_none();
-                if is_expr {
-                    values.push(InPlaceColumn::Expression(Expression::new(
-                        None,
-                        input.into(),
-                    )));
+        let mut values: Vec<InPlaceColumn> = vec![];
+        {
+            let metadata = self.session.metadata();
+            for col in metadata.get_table_columns()? {
+                if !exclude.contains(col) && col.to_lowercase().contains(&small_input) {
+                    values.push(InPlaceColumn::Column(col.to_owned()));
                 }
             }
 
-            let no_results = values.is_empty();
-            {
-                let mut s = state.borrow_mut();
-                s.values = values;
-                s.selected = 0;
-                s.width = width;
-                s.on_select = Some(callback);
-                s.target = Some(target_elem);
-                s.no_results = no_results;
+            for col in metadata.get_expression_columns() {
+                if !exclude.contains(col) && col.to_lowercase().contains(&small_input) {
+                    values.push(InPlaceColumn::Column(col.to_owned()));
+                }
             }
-            notify.emit(());
-            Ok(())
-        });
+        }
+
+        let width = target.get_bounding_client_rect().width();
+        let target_elem: HtmlElement = target.clone().into();
+
+        // Publish the synchronous matches immediately, *before* any async
+        // work, so the dropdown and `item_select` always reflect the latest
+        // keystroke rather than whichever async continuation happens to
+        // resolve last.
+        {
+            let mut s = self.state.borrow_mut();
+            s.values = values;
+            s.selected = 0;
+            s.width = width;
+            s.on_select = Some(callback);
+            s.target = Some(target_elem);
+            s.no_results = s.values.is_empty();
+        }
+        self.notify.emit(());
+
+        if !exclude.contains(&input) {
+            clone!(self.state, self.session, self.notify);
+            ApiFuture::spawn(async move {
+                let is_expr = crate::queries::validate_expr(&session, &input)
+                    .await?
+                    .is_none();
+                if is_expr && target.value() == input {
+                    let mut s = state.borrow_mut();
+                    s.values.push(InPlaceColumn::Expression(Expression::new(
+                        None,
+                        input.into(),
+                    )));
+                    s.no_results = false;
+                    drop(s);
+                    notify.emit(());
+                }
+                Ok(())
+            });
+        }
 
         Some(())
     }
@@ -207,6 +216,7 @@ impl Component for ColumnDropDownPortal {
             html! {
                 <PortalModal
                     tag_name="perspective-dropdown"
+                    sheet={StyleSurface::ColumnDropdown.sheet()}
                     {target}
                     own_focus=false
                     {on_close}
@@ -270,5 +280,5 @@ fn ColumnDropDownView(props: &ColumnDropDownViewProps) -> Html {
         props.width, props.width
     );
 
-    html! { <><style>{ CSS }</style><style>{ position }</style>{ body }</> }
+    html! { <><style>{ position }</style>{ body }</> }
 }

@@ -36,13 +36,6 @@ export async function gotoBasic(page: Page): Promise<void> {
     });
 }
 
-/**
- * Restore the viewer with `config`, then wait one animation frame so
- * the chart's scheduled render (`requestRender` → scheduler RAF →
- * `_fullRender`) has fired. By the time this returns, WebGL draw
- * commands have been issued to the GL context and `page.screenshot()`
- * will capture them.
- */
 export async function restoreChart(
     page: Page,
     config: ViewerConfigUpdate,
@@ -50,7 +43,7 @@ export async function restoreChart(
     await page.evaluate(
         async (c) => {
             const viewer = document.querySelector("perspective-viewer")!;
-            await (viewer as any).restore(c);
+            await viewer.restore(c);
         },
         config as unknown as Record<string, unknown>,
     );
@@ -68,15 +61,17 @@ export async function waitOneFrame(page: Page): Promise<void> {
 }
 
 /**
- * Take a screenshot of the viewer element (not the whole page) and
- * compare to `name`'s baseline. Cropping to the viewer excludes page
- * scrollbars / viewport chrome that would add pixel noise.
+ * Take a screenshot of the CHART (the slotted plugin element) and compare
+ * to `name`'s baseline.
  */
 export async function expectViewerScreenshot(
     page: Page,
     options: { maxDiffPixelRatio?: number } = {},
 ): Promise<void> {
-    const viewer = page.locator("perspective-viewer");
+    const chart = page.locator(
+        'perspective-viewer > [slot]:not([slot^="tab-"])',
+    );
+
     const snapshotName =
         test
             .info()
@@ -89,7 +84,7 @@ export async function expectViewerScreenshot(
             )
             .join("-") + ".png";
 
-    await expect(viewer).toHaveScreenshot(snapshotName, {
+    await expect(chart).toHaveScreenshot(snapshotName, {
         threshold: DEFAULT_THRESHOLD,
         maxDiffPixelRatio:
             options.maxDiffPixelRatio ?? DEFAULT_MAX_DIFF_PIXEL_RATIO,
@@ -206,12 +201,10 @@ export async function captureFrames(
                 return visit(document);
             };
 
-            // Cache the canvas reference across ticks.
             let cachedCanvas: HTMLCanvasElement | null = null;
 
             // Sampler canvas: the visible `.webgl-canvas` may have
             // any of three context modes:
-            //
             //   - blit mode: 2D context (host blits worker bitmaps
             //     onto it). `getImageData` works directly.
             //   - direct mode: `transferControlToOffscreen` —
@@ -220,16 +213,11 @@ export async function captureFrames(
             //     `getImageData` impossible.
             //   - in-process mode: WebGL context owned by main
             //     thread. `getContext("2d")` returns null.
-            //
-            // The unifying invariant: in all three modes the canvas
-            // is a valid image source for `drawImage`. Routing the
-            // sample through a 2D sampler canvas — `drawImage` copy
-            // followed by `getImageData` on the sampler — reads
-            // pixels in every mode without any production code
-            // change. The sampler is sized to the requested region,
-            // resized lazily as the source canvas dimensions change.
             const sampler = document.createElement("canvas");
-            const samplerCtx = sampler.getContext("2d");
+            const samplerCtx = sampler.getContext("2d", {
+                willReadFrequently: true,
+            });
+
             if (!samplerCtx) {
                 throw new Error(
                     "captureFrames: sampler canvas 2D context unavailable",
@@ -775,4 +763,92 @@ export function assertViewerQuiescent(
             );
         }
     }
+}
+
+export async function readPinnedTooltip(page: Page): Promise<string[] | null> {
+    return await page.evaluate(() => {
+        const host = document.querySelector(
+            'perspective-viewer > [slot]:not([slot^="tab-"])',
+        );
+
+        const tip = host?.shadowRoot?.querySelector(".webgl-tooltip");
+        return tip
+            ? [...tip.children].map((c) => (c.textContent ?? "").trim())
+            : null;
+    });
+}
+
+export function tooltipValue(
+    cells: string[],
+    label: string,
+): string | undefined {
+    const i = cells.indexOf(label);
+    return i >= 0 ? cells[i + 1] : undefined;
+}
+
+export async function sweepPinnedTooltips(
+    page: Page,
+    step: { x: number; y: number } = { x: 0.02, y: 0.05 },
+): Promise<string[][]> {
+    const box = await page.evaluate(() => {
+        const host = document.querySelector(
+            'perspective-viewer > [slot]:not([slot^="tab-"])',
+        );
+
+        if (!host) {
+            return null;
+        }
+
+        const r = host.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+
+    if (!box) {
+        return [];
+    }
+
+    const seen = new Map<string, string[]>();
+    for (let fx = 0.05; fx <= 0.96; fx += step.x) {
+        for (let fy = 0.05; fy <= 0.96; fy += step.y) {
+            await page.mouse.move(box.x + box.w * fx, box.y + box.h * fy);
+            await page.mouse.click(box.x + box.w * fx, box.y + box.h * fy);
+            const cells = await readPinnedTooltip(page);
+            if (cells && cells.length > 0) {
+                seen.set(JSON.stringify(cells), cells);
+            }
+        }
+    }
+
+    return [...seen.values()];
+}
+
+export async function viewYearRange(
+    page: Page,
+    suffix: string,
+): Promise<[number, number]> {
+    return await page.evaluate(async (s) => {
+        const viewer = document.querySelector("perspective-viewer")!;
+        const view = await (viewer as any).getView({ mode: "clone" });
+        try {
+            const columns = await view.to_columns();
+            const years: number[] = [];
+            for (const [name, values] of Object.entries(columns)) {
+                if (!name.endsWith(s)) {
+                    continue;
+                }
+
+                for (const value of values as (number | null)[]) {
+                    if (value === null || value === undefined) {
+                        continue;
+                    }
+
+                    years.push(new Date(Number(value)).getFullYear());
+                }
+            }
+
+            return [Math.min(...years), Math.max(...years)] as [number, number];
+        } finally {
+            await view.delete();
+        }
+    }, suffix);
 }

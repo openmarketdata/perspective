@@ -44,6 +44,7 @@ export const DEFAULT_CONFIG: ViewerConfigUpdate = {
     filter: [],
     group_by: [],
     group_rollup_mode: "rollup",
+    split_rollup_mode: "flat",
     plugin: "",
     plugin_config: {},
     settings: false,
@@ -90,6 +91,22 @@ export async function compareContentsToSnapshot(
     });
 
     await expect(formatted).toMatchSnapshot(pathArray);
+}
+
+export async function compareInnerHTMLToSnapshot(
+    locator: Locator,
+    extraSnapshotPath?: string[],
+): Promise<void> {
+    const contents = await locator.evaluate((el) => el.innerHTML);
+    await compareContentsToSnapshot(contents, extraSnapshotPath);
+}
+
+export async function compareOuterHTMLToSnapshot(
+    locator: Locator,
+    extraSnapshotPath?: string[],
+): Promise<void> {
+    const contents = await locator.evaluate((el) => el.outerHTML);
+    await compareContentsToSnapshot(contents, extraSnapshotPath);
 }
 
 export async function compareNodes(

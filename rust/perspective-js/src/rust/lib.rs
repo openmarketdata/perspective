@@ -53,6 +53,9 @@ export type * from "../../src/ts/ts-rs/ColumnWindow.d.ts";
 export type * from "../../src/ts/ts-rs/TableInitOptions.d.ts";
 export type * from "../../src/ts/ts-rs/ViewConfigUpdate.d.ts";
 export type * from "../../src/ts/ts-rs/ViewOnUpdateResp.d.ts";
+export type * from "../../src/ts/ts-rs/ViewOnRemoveResp.d.ts";
+export type * from "../../src/ts/ts-rs/OnRemoveData.d.ts";
+export type * from "../../src/ts/ts-rs/OnUpdateData.d.ts";
 export type * from "../../src/ts/ts-rs/OnUpdateOptions.d.ts";
 export type * from "../../src/ts/ts-rs/UpdateOptions.d.ts";
 export type * from "../../src/ts/ts-rs/DeleteOptions.d.ts";
@@ -64,6 +67,9 @@ export type * from "../../src/ts/ts-rs/ViewConfig.d.ts";
 export type * from "../../src/ts/ts-rs/JoinOptions.ts";
 export type * from "../../src/ts/ts-rs/JoinType.ts";
 export type * from "../../src/ts/ts-rs/TypedArrayWindow.ts";
+export type * from "../../src/ts/ts-rs/Features.ts";
+export type * from "../../src/ts/ts-rs/AggSpec.ts";
+export type * from "../../src/ts/ts-rs/WindowAggSpec.ts";
 
 import type {ColumnWindow} from "../../src/ts/ts-rs/ColumnWindow.d.ts";
 import type {ColumnType} from "../../src/ts/ts-rs/ColumnType.d.ts";
@@ -74,10 +80,15 @@ import type {JoinOptions} from "../../src/ts/ts-rs/JoinOptions.ts";
 import type {JoinType} from "../../src/ts/ts-rs/JoinType.ts";
 import type {ViewConfigUpdate} from "../../src/ts/ts-rs/ViewConfigUpdate.d.ts";
 import type * as on_update_args from "../../src/ts/ts-rs/ViewOnUpdateResp.d.ts";
+import type {OnRemoveData} from "../../src/ts/ts-rs/OnRemoveData.d.ts";
+import type {OnUpdateData} from "../../src/ts/ts-rs/OnUpdateData.d.ts";
 import type {OnUpdateOptions} from "../../src/ts/ts-rs/OnUpdateOptions.d.ts";
 import type {UpdateOptions} from "../../src/ts/ts-rs/UpdateOptions.d.ts";
 import type {DeleteOptions} from "../../src/ts/ts-rs/DeleteOptions.d.ts";
 import type {SystemInfo} from "../../src/ts/ts-rs/SystemInfo.d.ts";
+import type {ViewConfig} from "../../src/ts/ts-rs/ViewConfig.d.ts";
+import type {Scalar} from "../../src/ts/ts-rs/Scalar.d.ts";
+import type {Features} from "../../src/ts/ts-rs/Features.ts";
 "#;
 
 #[cfg(feature = "export-init")]

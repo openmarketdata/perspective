@@ -22,13 +22,10 @@ use perspective_js::utils::global::navigator;
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 
-use super::modal::{ModalLink, SetModalLink};
-use super::style::LocalStyle;
 use crate::components::datetime_column_style::custom::DatetimeStyleCustom;
 use crate::components::datetime_column_style::simple::DatetimeStyleSimple;
-use crate::components::form::select_value_field::SelectValueField;
 use crate::config::*;
-use crate::css;
+use crate::ui::{ModalLink, SelectValueField, SetModalLink};
 use crate::utils::WeakScope;
 
 /// Format-only widget for `datetime` columns. Renders the `date_format`
@@ -39,6 +36,9 @@ use crate::utils::WeakScope;
 pub struct DatetimeColumnStyleProps {
     pub enable_time_config: bool,
     pub config: Option<DatetimeColumnStyleConfig>,
+
+    /// The active plugin's declared default `date_format`.
+    pub default_format: Rc<DatetimeFormatType>,
 
     #[prop_or_default]
     pub on_change: Callback<ColumnConfigFieldUpdate>,
@@ -59,7 +59,9 @@ impl ModalLink<DatetimeColumnStyle> for DatetimeColumnStyleProps {
 
 impl PartialEq for DatetimeColumnStyleProps {
     fn eq(&self, other: &Self) -> bool {
-        self.enable_time_config == other.enable_time_config && self.config == other.config
+        self.enable_time_config == other.enable_time_config
+            && self.config == other.config
+            && self.default_format == other.default_format
     }
 }
 
@@ -92,7 +94,9 @@ impl Component for DatetimeColumnStyle {
             std::mem::swap(&mut self.config, &mut new_config);
             rerender = true;
         }
-        if old.enable_time_config != ctx.props().enable_time_config {
+        if old.enable_time_config != ctx.props().enable_time_config
+            || old.default_format != ctx.props().default_format
+        {
             rerender = true;
         }
         rerender
@@ -101,22 +105,24 @@ impl Component for DatetimeColumnStyle {
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             DatetimeColumnStyleMsg::TimezoneChanged(val) => {
+                let mut format = self.effective_format(ctx);
                 if Some(&*USER_TIMEZONE) != val.as_ref() {
-                    *self.config.date_format.time_zone_mut() = val;
+                    *format.time_zone_mut() = val;
                 } else {
-                    *self.config.date_format.time_zone_mut() = None;
+                    *format.time_zone_mut() = None;
                 }
 
+                self.set_format(ctx, format);
                 self.dispatch_config(ctx);
                 true
             },
             DatetimeColumnStyleMsg::SimpleDatetimeStyleConfigChanged(simple) => {
-                self.config.date_format = DatetimeFormatType::Simple(simple);
+                self.set_format(ctx, DatetimeFormatType::Simple(simple));
                 self.dispatch_config(ctx);
                 true
             },
             DatetimeColumnStyleMsg::CustomDatetimeStyleConfigChanged(custom) => {
-                self.config.date_format = DatetimeFormatType::Custom(custom);
+                self.set_format(ctx, DatetimeFormatType::Custom(custom));
                 self.dispatch_config(ctx);
                 true
             },
@@ -124,9 +130,26 @@ impl Component for DatetimeColumnStyle {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
+        let format = self.effective_format(ctx);
+        let (date_style_default, time_style_default) = match &*ctx.props().default_format {
+            DatetimeFormatType::Simple(simple) => (simple.date_style, simple.time_style),
+            DatetimeFormatType::Custom(_) => {
+                (SimpleDatetimeFormat::Short, SimpleDatetimeFormat::Medium)
+            },
+        };
+
+        let simple_reset = {
+            let default_format = ctx.props().default_format.clone();
+            ctx.link().callback(move |_| {
+                DatetimeColumnStyleMsg::SimpleDatetimeStyleConfigChanged(match &*default_format {
+                    DatetimeFormatType::Simple(simple) => simple.clone(),
+                    DatetimeFormatType::Custom(_) => SimpleDatetimeStyleConfig::default(),
+                })
+            })
+        };
+
         html! {
             <>
-                <LocalStyle href={css!("column-style")} />
                 <div id="column-style-container" class="datetime-column-style-container">
                     if ctx.props().enable_time_config {
                         <SelectValueField<String>
@@ -134,10 +157,10 @@ impl Component for DatetimeColumnStyle {
                             values={ALL_TIMEZONES.with(|x| (*x).clone())}
                             default_value={(*USER_TIMEZONE).clone()}
                             on_change={ctx.link().callback(DatetimeColumnStyleMsg::TimezoneChanged)}
-                            current_value={self.config.date_format.time_zone().as_ref().unwrap_or(&*USER_TIMEZONE).clone()}
+                            current_value={format.time_zone().as_ref().unwrap_or(&*USER_TIMEZONE).clone()}
                         />
                     }
-                    if let DatetimeFormatType::Simple(config) = &self.config.date_format {
+                    if let DatetimeFormatType::Simple(config) = &format {
                         if ctx.props().enable_time_config {
                             <div class="row">
                                 <button
@@ -152,15 +175,17 @@ impl Component for DatetimeColumnStyle {
                             enable_time_config={ctx.props().enable_time_config}
                             on_change={ctx.link().callback(DatetimeColumnStyleMsg::SimpleDatetimeStyleConfigChanged)}
                             config={config.clone()}
+                            {date_style_default}
+                            {time_style_default}
                         />
-                    } else if let DatetimeFormatType::Custom(config) = &self.config.date_format {
+                    } else if let DatetimeFormatType::Custom(config) = &format {
                         if ctx.props().enable_time_config {
                             <div class="row">
                                 <button
                                     id="datetime_format"
                                     data-title="Custom"
                                     data-title-hover="Switch to Simple"
-                                    onclick={ctx.link().callback(|_| DatetimeColumnStyleMsg::SimpleDatetimeStyleConfigChanged(SimpleDatetimeStyleConfig::default()))}
+                                    onclick={simple_reset}
                                 />
                             </div>
                         }
@@ -204,6 +229,17 @@ static USER_TIMEZONE: LazyLock<String> = LazyLock::new(|| {
 });
 
 impl DatetimeColumnStyle {
+    fn effective_format(&self, ctx: &Context<Self>) -> DatetimeFormatType {
+        self.config
+            .date_format
+            .clone()
+            .unwrap_or_else(|| (*ctx.props().default_format).clone())
+    }
+
+    fn set_format(&mut self, ctx: &Context<Self>, format: DatetimeFormatType) {
+        self.config.date_format = (format != *ctx.props().default_format).then_some(format);
+    }
+
     /// When this config has changed, we must signal the wrapper element.
     fn dispatch_config(&self, ctx: &Context<Self>) {
         let value = if self.config == DatetimeColumnStyleConfig::default() {

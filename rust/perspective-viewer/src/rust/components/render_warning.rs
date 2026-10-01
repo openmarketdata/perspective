@@ -12,8 +12,6 @@
 
 use yew::prelude::*;
 
-use super::style::LocalStyle;
-use crate::css;
 use crate::renderer::limits::RenderLimits;
 
 #[derive(Properties, PartialEq)]
@@ -29,13 +27,13 @@ pub struct RenderWarningProps {
 pub fn render_warning(props: &RenderWarningProps) -> Html {
     let dimensions = props.dimensions;
     let (col_warn, row_warn) = if let Some(limits) = dimensions {
-        let col_warn = if limits.max_cols.is_some_and(|x| x < limits.num_cols) {
+        let col_warn = if limits.is_col_capped() {
             Some((limits.max_cols.unwrap(), limits.num_cols))
         } else {
             None
         };
 
-        let row_warn = if limits.max_rows.is_some_and(|x| x < limits.num_rows) {
+        let row_warn = if limits.is_row_capped() {
             Some((
                 limits.num_cols * limits.max_rows.unwrap(),
                 limits.num_cols * limits.num_rows,
@@ -81,7 +79,6 @@ pub fn render_warning(props: &RenderWarningProps) -> Html {
         let onclick = Callback::from(move |_: MouseEvent| on_dismiss.emit(()));
         html! {
             <>
-                <LocalStyle href={css!("render-warning")} />
                 <div
                     class="plugin_information plugin_information--warning"
                     id="plugin_information--size"

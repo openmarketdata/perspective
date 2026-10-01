@@ -22,7 +22,12 @@ import {
     bundleAsync as bundleAsyncCss,
 } from "lightningcss";
 import { compress } from "pro_self_extracting_wasm";
-import { get_host, inlineUrlVisitor, resolveNPM } from "./tools.mjs";
+import {
+    buildDocsCorpus,
+    get_host,
+    inlineUrlVisitor,
+    resolveNPM,
+} from "./tools.mjs";
 
 const IS_DEBUG =
     !!process.env.PSP_DEBUG || process.argv.indexOf("--debug") >= 0;
@@ -36,7 +41,10 @@ export async function build_all() {
     if (!process.env.PSP_SKIP_WASM) {
         execSync(
             `cargo bundle --target=${get_host()} -- perspective_viewer ${IS_DEBUG ? "" : "--release"}`,
-            INHERIT,
+            {
+                ...INHERIT,
+                env: { ...process.env, PSP_ROOT_DIR: "../.." },
+            },
         );
 
         await compress(
@@ -45,33 +53,15 @@ export async function build_all() {
         );
     }
 
+    // The agent metadata bundle: `search_docs` corpus + tool parameter
+    // schemas (needs the freshly-emitted `.d.ts` / ts-rs output).
+    const docs_stats = await buildDocsCorpus();
+    console.log(
+        `docs corpus: ${docs_stats.chunks} chunks / ${docs_stats.bytes} bytes from ${docs_stats.files} files`,
+    );
+
     // JavaScript
     const BUILD = [
-        // WASM assets inlined into a single monolithic `.js` file. No special
-        // loades required, this version of Perspective should be the easiest
-        // to use but also the least performant at load time.
-        // {
-        //     'Import via `<script type="module">`': true,
-        //     "Requires WASM bootstrap": false,
-        //     "Load as binary": false,
-        //     "Bundler friendly": true,
-        // },
-        {
-            entryPoints: ["src/ts/perspective-viewer.inline.ts"],
-            format: "esm",
-            loader: { ".wasm": "binary" },
-            outfile: "dist/esm/perspective-viewer.inline.js",
-            plugins: [
-                WorkerPlugin({
-                    inline: !process.env.PSP_DEBUG,
-                    // plugins: [GlslMinify(), LightningCssMinify()],
-                    // loader: {
-                    //     ".css": "text",
-                    //     ".glsl": "text",
-                    // },
-                }),
-            ],
-        },
         // No WASM assets inlined or linked.
         // {
         //     'Import via `<script type="module">`': true, // *****
@@ -94,6 +84,15 @@ export async function build_all() {
                     // },
                 }),
             ],
+        },
+        // Dependency-free leaf modules, published as the `./select-detail`
+        // and `./column-format` subpath exports. Plugin packages import these
+        // instead of the package root, which would link the entire viewer and
+        // its wasm asset into a plugin's standalone `dist/cdn` bundle.
+        {
+            entryPoints: ["src/ts/select-detail.ts", "src/ts/column-format.ts"],
+            format: "esm",
+            outdir: "dist/esm",
         },
         // WASM assets linked to relative path via `fetch()`. This efficiently
         // loading build is great for `<script>` tags but will give many
@@ -161,6 +160,11 @@ export async function build_all() {
         "gruvbox",
         "gruvbox-dark",
         "dracula",
+        "nord",
+        "ledger",
+        "blueprint",
+        "eggplant",
+        "velvet",
         "themes",
     ];
 
@@ -176,7 +180,7 @@ export async function build_all() {
         fs.writeFileSync(`dist/css/${name}.css`, code);
     }
 
-    const intl_langs = ["de", "es", "fr", "ja", "pt", "zh"];
+    const intl_langs = ["ar", "de", "es", "fr", "ja", "pt", "zh"];
     for (const lang of intl_langs) {
         const filename = `./src/themes/intl/${lang}.css`;
         const { code } = await bundleAsyncCss({

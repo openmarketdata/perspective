@@ -79,11 +79,61 @@ min_val, max_val = view.get_min_max("Sales")
 
 </div>
 
+## Describing a View Config
+
+`Table::describe` validates a complete view config against a table and
+reports the schema a `View` built from it would have - without creating one.
+`describe` reports a `view_schema` if and only if `Table::view` with the same
+config would succeed, and the two schemas are equal. It costs no engine
+resources, so it is the right way to check a config before applying it.
+
+<div class="javascript">
+
+```javascript
+const verdict = await table.describe({
+    columns: ["Sales", "margin"],
+    group_by: ["Region"],
+    expressions: { margin: '"Profit" / "Sales"' },
+    aggregates: { margin: "avg" },
+});
+
+if ("view_schema" in verdict) {
+    // { expression_schema: { margin: "float" },
+    //   view_schema: { Sales: "float", margin: "float" } }
+} else if ("expression_errors" in verdict) {
+    // { expression_schema: {...}, expression_errors: { margin: { error_message, line, column } } }
+} else {
+    // { config_error: "Invalid column 'Sales' found in View columns." }
+}
+```
+
+</div>
+<div class="python">
+
+```python
+verdict = table.describe(
+    columns=["Sales", "margin"],
+    group_by=["Region"],
+    expressions={"margin": '"Profit" / "Sales"'},
+    aggregates={"margin": "avg"},
+)
+
+if "view_schema" in verdict:
+    ...
+elif "expression_errors" in verdict:
+    ...
+else:
+    verdict["config_error"]
+```
+
+</div>
+
 ## Expression Validation
 
-Before creating a `View` with expressions, you can validate them against the
-table's schema using `Table::validate_expressions`. This returns information
-about which expressions are valid and their inferred types:
+`Table::validate_expressions` is a specialization of `Table::describe` over
+a config that selects no columns, so only the expressions are checked. It
+returns which expressions are valid and their inferred types, plus an
+`expression_alias` map echoing the request:
 
 <div class="javascript">
 
@@ -182,19 +232,60 @@ When `mode` is set to `"row"`, the callback receives a delta of only the rows
 that changed (as Apache Arrow), which is useful for efficiently synchronizing
 tables across clients.
 
-## Flattening a View into a Table
+## Remove Callbacks
 
-In Javascript, a [`Table`] can be constructed on a [`Table::view`] instance,
-which will return a new [`Table`] based on the [`Table::view`]'s dataset, and
-all future updates that affect the [`Table::view`] will be forwarded to the new
-[`Table`]. This is particularly useful for implementing a
-[Client/Server Replicated](server.md#clientserver-replicated) design, by
-serializing the `View` to an arrow and setting up an `on_update` callback.
+Register a callback to be notified whenever rows are removed from the underlying
+`Table` by `remove()`, which requires an `index`. The callback receives the
+`port_id` and the removed `index` column values as an Apache Arrow of a single
+column named after the index. It fires once per update step, only for rows which
+existed before that step; `replace()` reports the keys it does not re-supply,
+and `clear()` reports every key:
 
 <div class="javascript">
 
 ```javascript
-const worker1 = perspective.worker();
+const callback = await view.on_remove(({ indices, port_id }) => {
+    replica.remove(indices);
+});
+
+// Later, remove the callback
+await view.remove_remove(callback);
+```
+
+</div>
+<div class="python">
+
+```python
+def on_remove(port_id, indices):
+    replica.remove(indices)
+
+callback = view.on_remove(on_remove)
+view.remove_remove(callback)
+```
+
+</div>
+
+## Flattening a View into a Table
+
+A [`Table`] can be constructed on a [`Table::view`] instance, which will return
+a new [`Table`] based on the [`Table::view`]'s dataset, and all future updates
+that affect the [`Table::view`] will be forwarded to the new [`Table`]. This is
+particularly useful for implementing a
+[Client/Server Replicated](../architecture/client_server.md) design, as it
+handles the `View` serialization and `on_update` forwarding for you. This
+pattern is available in JavaScript, Python and Rust.
+
+When the source `Table` has an `index`, and the `View` is unpivoted and includes
+the index column, the new `Table` inherits that `index` and subscribes to the
+source's `on_remove()`, so in-place updates and `remove()` calls on the source
+are mirrored rather than appended. A pivoted `View`, or one which omits the
+index column, produces an unindexed, append-only `Table`. A `limit` is inherited
+the same way. `replace()` and `clear()` on the source are mirrored too.
+
+<div class="javascript">
+
+```javascript
+const worker = await perspective.worker();
 const table = await worker.table(data);
 const view = await table.view({ filter: [["State", "==", "Texas"]] });
 const table2 = await worker.table(view);
@@ -205,14 +296,9 @@ table.update([{ State: "Texas", City: "Austin" }]);
 <div class="python">
 
 ```python
-table = perspective.Table(data);
+table = client.table(data)
 view = table.view(filter=[["State", "==", "Texas"]])
-table2 = perspective.Table(view.to_arrow());
-
-def updater(port, delta):
-    table2.update(delta)
-
-view.on_update(updater, mode="Row")
+table2 = client.table(view)
 table.update([{"State": "Texas", "City": "Austin"}])
 ```
 

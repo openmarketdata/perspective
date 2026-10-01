@@ -11,12 +11,11 @@
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 mod column_locator;
-pub mod drag_helpers;
 mod props;
 mod sheets;
 
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -27,20 +26,15 @@ use web_sys::*;
 use yew::html::ImplicitClone;
 use yew::prelude::*;
 
-pub use self::column_locator::{ColumnLocator, ColumnSettingsTab, ColumnTab, OpenColumnSettings};
-use self::drag_helpers::DragTargetState;
-pub use self::drag_helpers::{DragDropContainer, DragEndCallback};
+pub use self::column_locator::{
+    ColumnLocator, ColumnSettingsTab, ColumnSettingsTarget, OpenColumnSettings,
+};
 pub use self::props::{DragDropProps, PresentationProps};
-use crate::utils::*;
-
-/// The available themes as detected in the browser environment or set
-/// explicitly when CORS prevents detection.  Detection is expensive and
-/// typically must be performed only once, when `document.styleSheets` is
-/// up-to-date.
-#[derive(Default)]
-struct ThemeData {
-    themes: Option<Vec<String>>,
-}
+pub use crate::ui::{DragDropContainer, DragEndCallback};
+use crate::ui::{
+    DragTargetState, PointerDownCallback, clear_document_selection, closest_draggable,
+};
+use crate::utils::{CssKind, NamedValue, assign_palette_names, *};
 
 #[derive(Clone, Debug)]
 struct DragFrom {
@@ -71,10 +65,33 @@ impl DragState {
 /// Actual presentations tate struct with some fields hidden.
 pub struct PresentationHandle {
     viewer_elem: HtmlElement,
-    theme_data: Mutex<ThemeData>,
+
+    /// The embedded LLM agent's shared model (runtime + chat transcript) —
+    /// carried here so the settings sidebar can render the chat tab without
+    /// threading a new prop chain from the element.
+    #[cfg(feature = "llm-agent")]
+    pub agent: crate::agent::AgentSlot,
+
+    /// The available themes as detected in the browser environment or set
+    /// explicitly when CORS prevents detection.
+    themes: RefCell<Option<Vec<String>>>,
+
+    /// Single-flight guard for the stylesheet parse that populates
+    /// [`Self::themes`] (and exclusion against `reset_available_themes`) —
+    /// concurrent `get_available_themes` calls await one parse instead of
+    /// racing their own.
+    theme_init: Mutex<()>,
+
+    /// Whether the host's theme was ever EXPLICITLY chosen — authored as a
+    /// `theme` attribute, or set by name through [`Self::set_theme_name`].
+    theme_selected: Cell<bool>,
+
+    palette: RefCell<BTreeMap<String, String>>,
     is_settings_open: RefCell<bool>,
     open_column_settings: RefCell<OpenColumnSettings>,
     is_workspace: RefCell<Option<bool>>,
+
+    collapsed_control_groups: RefCell<HashSet<String>>,
 
     /// Drag/drop in-progress state. Empty (`NoDrag`) when no user drag is
     /// active. Mutated by `notify_drag_*` / `notify_drop`; read by component
@@ -96,30 +113,22 @@ pub struct PresentationHandle {
     /// dragged element from the shadow tree.
     host_dragend: RefCell<Option<DragEndCallback>>,
 
+    /// Host-level `pointerdown` listener that clears a stale page selection
+    /// before it can turn a row drag into a browser selection drag.
+    host_pointerdown: RefCell<Option<PointerDownCallback>>,
+
+    source_dragend: RefCell<Option<(web_sys::EventTarget, DragEndCallback)>>,
+
     /// IntersectionObserver-based fallback for the drag image, kept alive for
     /// the duration of the drag.
     drag_target: RefCell<Option<DragTargetState>>,
 
-    /// Per-element dedup cell for `perspective-config-update` event
-    /// dispatch. Read+written by `crate::custom_events::dispatch_*`
-    /// helpers; living here means every consumer with a `&Presentation`
-    /// (subscriptions in `wire_custom_events`, `tasks::send_plugin_config`,
-    /// `setSelection`) sees the same cache without separate plumbing.
-    pub last_dispatched_config: RefCell<Option<crate::config::ViewerConfig>>,
-
-    pub settings_open_changed: PubSub<bool>,
-
-    /// Injected callback from the root component, replacing the former
-    /// `is_workspace_changed: PubSub` field.
+    pub settings_open_changed: PubSub<(bool, bool)>,
     pub on_is_workspace_changed: RefCell<Option<Callback<bool>>>,
     pub settings_before_open_changed: PubSub<bool>,
     pub column_settings_open_changed: PubSub<(bool, Option<String>)>,
     pub theme_config_updated: PubSub<(PtrEqRc<Vec<String>>, Option<usize>)>,
     pub on_eject: PubSub<()>,
-
-    /// Fires for status-bar / main-panel pointer events that target the
-    /// statusbar element. `wire_custom_events` formats the `PointerEvent`'s
-    /// `type_()` into a `perspective-statusbar-{type}` `CustomEvent` name.
     pub statusbar_pointer_event: PubSub<PointerEvent>,
 }
 
@@ -148,7 +157,12 @@ impl Presentation {
     pub fn new(elem: &HtmlElement) -> Self {
         let theme = Self(Rc::new(PresentationHandle {
             viewer_elem: elem.clone(),
-            theme_data: Default::default(),
+            #[cfg(feature = "llm-agent")]
+            agent: Default::default(),
+            themes: Default::default(),
+            theme_init: Default::default(),
+            theme_selected: Cell::new(elem.get_attribute("theme").is_some()),
+            palette: Default::default(),
             is_workspace: Default::default(),
             settings_open_changed: Default::default(),
             settings_before_open_changed: Default::default(),
@@ -156,18 +170,21 @@ impl Presentation {
             on_is_workspace_changed: Default::default(),
             is_settings_open: Default::default(),
             open_column_settings: Default::default(),
+            collapsed_control_groups: Default::default(),
             theme_config_updated: PubSub::default(),
             on_eject: PubSub::default(),
             statusbar_pointer_event: PubSub::default(),
-            last_dispatched_config: Default::default(),
             drag_state: Default::default(),
             drop_received: Default::default(),
             on_dragstart: Default::default(),
             on_dragend: Default::default(),
             host_dragend: Default::default(),
+            host_pointerdown: Default::default(),
+            source_dragend: Default::default(),
             drag_target: Default::default(),
         }));
 
+        theme.register_host_pointerdown();
         ApiFuture::spawn(theme.clone().init());
         theme
     }
@@ -230,13 +247,84 @@ impl Presentation {
         }
     }
 
-    pub fn set_settings_open(&self, open: bool) {
-        self.settings_open_changed.emit(open);
+    /// See [`PresentationHandle::settings_open_changed`] for `announce`.
+    pub fn set_settings_open(&self, open: bool, announce: bool) {
+        self.settings_open_changed.emit((open, announce));
     }
 
     /// Sets the currently opened column settings. Emits an internal event on
     /// change. Passing None is a shorthand for setting all fields to
     /// None.
+    /// The workspace palette as last restored (canonical values).
+    pub fn palette(&self) -> BTreeMap<String, String> {
+        self.0.palette.borrow().clone()
+    }
+
+    /// Replace the host palette: every previously-applied `--psp-user--*`
+    /// inline property is removed, then `palette` is applied.
+    pub fn set_palette(&self, palette: BTreeMap<String, String>) -> ApiResult<()> {
+        let style = self.0.viewer_elem.style();
+        for name in self.0.palette.borrow().keys() {
+            style.remove_property(name)?;
+        }
+
+        for (name, value) in &palette {
+            style.set_property(name, value)?;
+        }
+
+        *self.0.palette.borrow_mut() = palette;
+        Ok(())
+    }
+
+    /// Pin `literal` into the restored palette, named by the same rules
+    /// as the derived set and applied to the host.
+    pub fn pin_style(&self, kind: CssKind, literal: &str) -> ApiResult<()> {
+        let Ok(value) = kind.canonicalize(literal) else {
+            return Ok(());
+        };
+
+        let current = self.palette();
+        let host = self.host_named_values(kind);
+        let set = assign_palette_names(&current, &host, &[(kind, value)], &|name| {
+            self.resolve_css_var(name).is_some()
+        });
+
+        let style = self.0.viewer_elem.style();
+        for (name, value) in &set {
+            if !current.contains_key(name) {
+                style.set_property(name, value)?;
+            }
+        }
+
+        *self.0.palette.borrow_mut() = set;
+        Ok(())
+    }
+
+    /// The host's computed value for custom property `name` (inline
+    /// palette, then theme/page stylesheets), or `None` if undefined.
+    pub fn resolve_css_var(&self, name: &str) -> Option<String> {
+        read_custom_property(&self.0.viewer_elem, name)
+    }
+
+    /// Theme/page-authored named values of `kind` on the host, canonical,
+    /// discovered by the contiguous-numbering walk `--psp-user--<kind>-1`,
+    /// `-2`, … up to the first undefined name.
+    pub fn host_named_values(&self, kind: CssKind) -> Vec<NamedValue> {
+        let mut out = vec![];
+        for n in 1.. {
+            let name = format!("{}{n}", kind.var_prefix());
+            let Some(raw) = self.resolve_css_var(&name) else {
+                break;
+            };
+
+            if let Ok(value) = kind.canonicalize(&raw) {
+                out.push(NamedValue { name, value });
+            }
+        }
+
+        out
+    }
+
     pub fn set_open_column_settings(&self, settings: Option<OpenColumnSettings>) {
         let settings = settings.unwrap_or_default();
         if *(self.open_column_settings.borrow()) != settings {
@@ -251,6 +339,20 @@ impl Presentation {
         self.open_column_settings.borrow().deref().clone()
     }
 
+    pub fn is_control_group_collapsed(&self, key: &str) -> bool {
+        self.collapsed_control_groups.borrow().contains(key)
+    }
+
+    pub fn set_control_group_collapsed(&self, key: &str, collapsed: bool) {
+        if collapsed {
+            self.collapsed_control_groups
+                .borrow_mut()
+                .insert(key.to_owned());
+        } else {
+            self.collapsed_control_groups.borrow_mut().remove(key);
+        }
+    }
+
     async fn init(self) -> ApiResult<()> {
         self.set_theme_attribute(self.get_selected_theme_name().await.as_deref())
     }
@@ -259,14 +361,14 @@ impl Presentation {
     /// readable stylesheets.  This method is memoized - the state can be
     /// flushed by calling `reset()`.
     pub async fn get_available_themes(&self) -> ApiResult<PtrEqRc<Vec<String>>> {
-        let mut data = self.0.theme_data.lock().await;
-        if data.themes.is_none() {
+        let _guard = self.0.theme_init.lock().await;
+        if self.0.themes.borrow().is_none() {
             await_dom_loaded().await?;
             let themes = sheets::get_theme_names(&self.0.viewer_elem)?;
-            data.themes = Some(themes);
+            *self.0.themes.borrow_mut() = Some(themes);
         }
 
-        Ok(data.themes.clone().unwrap().into())
+        Ok(self.0.themes.borrow().clone().unwrap().into())
     }
 
     /// Reset the state.  `styleSheets` will be re-parsed next time
@@ -281,9 +383,9 @@ impl Presentation {
                 .unwrap_or_default()
         }
 
-        let mut mutex = self.0.theme_data.lock().await;
-        let changed = as_set(&mutex.themes) != as_set(&themes);
-        mutex.themes = themes;
+        let _guard = self.0.theme_init.lock().await;
+        let changed = as_set(&self.0.themes.borrow()) != as_set(&themes);
+        *self.0.themes.borrow_mut() = themes;
         changed
     }
 
@@ -307,6 +409,24 @@ impl Presentation {
         index.and_then(|x| themes.get(x).cloned())
     }
 
+    /// The theme a NEW panel is born with: the host's if it has one, else
+    /// the registry default. Synchronous, because panel creation is — the
+    /// registry fallback is `None` until the registry first parses, which
+    /// [`crate::tasks::seed_panel_theme`] fills in.
+    pub fn active_theme_name_sync(&self) -> Option<String> {
+        self.0
+            .viewer_elem
+            .get_attribute("theme")
+            .or_else(|| self.0.themes.borrow().as_ref()?.first().cloned())
+    }
+
+    /// The registry default — the FIRST registered theme, which a panel or
+    /// host resolves to only when it has no theme of its own. `None` if no
+    /// themes exist.
+    pub async fn get_default_theme_name(&self) -> Option<String> {
+        self.get_available_themes().await.ok()?.first().cloned()
+    }
+
     fn set_theme_attribute(&self, theme: Option<&str>) -> ApiResult<()> {
         if let Some(theme) = theme {
             Ok(self.0.viewer_elem.set_attribute("theme", theme)?)
@@ -317,37 +437,89 @@ impl Presentation {
 
     pub async fn reset_theme(&self) -> ApiResult<()> {
         *self.0.is_workspace.borrow_mut() = None;
-        let themes = self.get_available_themes().await?;
-        let default_theme = themes.first().map(|x| x.as_str());
-        self.set_theme_name(default_theme).await?;
+        self.set_theme_name(None).await?;
         Ok(())
+    }
+
+    /// Adopt `themes` as the available set, KEEPING the host's theme unless
+    /// it was never explicitly chosen or has left the set — the only two
+    /// cases in which re-ordering the registry may move the viewer.
+    ///
+    /// Always re-stamps; the caller publishes ([`Self::publish_theme_config`])
+    /// once its restyles have resolved, because the available list has
+    /// changed even when the selection has not.
+    ///
+    /// @param themes the new set, or `None` to re-parse the document.
+    ///
+    /// # Returns
+    /// The active theme after the change.
+    pub async fn reset_themes(&self, themes: Option<Vec<String>>) -> ApiResult<Option<String>> {
+        let selected = self
+            .0
+            .theme_selected
+            .get()
+            .then(|| self.0.viewer_elem.get_attribute("theme"))
+            .flatten();
+
+        self.reset_available_themes(themes).await;
+        let available = self.get_available_themes().await?;
+        let kept = selected.filter(|name| available.contains(name));
+        self.0.theme_selected.set(kept.is_some());
+        let active = kept.or_else(|| available.first().cloned());
+        self.set_theme_attribute(active.as_deref())?;
+        Ok(active)
     }
 
     /// Set the theme by name, or `None` for the default theme.
     ///
+    /// A NAMED theme's host attribute write is SYNCHRONOUS ("stamp with
+    /// commit") — no await separates the caller's config commit from the
+    /// attribute the document cascade styles, so a slow theme-registry
+    /// init can no longer hold the host on the former theme while e.g. an
+    /// initial `restore()`'s first draw resolves. The registry-dependent
+    /// tail (theme-list resolution + `theme_config_updated`) follows
+    /// asynchronously. `None` (reset to the registry default) still
+    /// resolves through the registry first, as the default name is not
+    /// knowable synchronously on a cold cache.
+    ///
+    /// The attribute is stamped even when the requested name is not (yet)
+    /// a registered theme — matching the prior behavior for unknown
+    /// names, and additionally making an explicitly-requested name that
+    /// HAPPENS to be the registry default explicit on the element (the
+    /// old resolved-selection no-op left it absent).
+    ///
     /// # Returns
     /// A `bool` indicating whether the internal state changed.
     pub async fn set_theme_name(&self, theme: Option<&str>) -> ApiResult<bool> {
-        let (themes, selected) = self.get_selected_theme_config().await?;
-        if let Some(x) = selected
-            && themes.get(x).map(|x| x.as_str()) == theme
-        {
-            return Ok(false);
+        self.0.theme_selected.set(theme.is_some());
+        if let Some(theme) = theme {
+            if self.0.viewer_elem.get_attribute("theme").as_deref() == Some(theme) {
+                return Ok(false);
+            }
+
+            self.set_theme_attribute(Some(theme))?;
         }
 
-        let index = if let Some(theme) = theme {
-            self.set_theme_attribute(Some(theme))?;
-            themes.iter().position(|x| x == theme)
-        } else if !themes.is_empty() {
+        let themes = self.get_available_themes().await?;
+        if theme.is_none() {
             self.set_theme_attribute(themes.first().map(|x| x.as_str()))?;
-            Some(0)
-        } else {
-            self.set_theme_attribute(None)?;
-            None
-        };
+        }
+
+        Ok(true)
+    }
+
+    /// Publish the `theme_config_updated` snapshot — the available themes
+    /// and the host's current selection — to the component tree.
+    pub async fn publish_theme_config(&self) -> ApiResult<()> {
+        let themes = self.get_available_themes().await?;
+        let index = self
+            .0
+            .viewer_elem
+            .get_attribute("theme")
+            .and_then(|active| themes.iter().position(|x| *x == active));
 
         self.theme_config_updated.emit((themes, index));
-        Ok(true)
+        Ok(())
     }
 
     /// Snapshot the drag state as a [`DragDropProps`] value for threading
@@ -384,17 +556,53 @@ impl Presentation {
         }
     }
 
-    pub fn set_drag_image(&self, event: &DragEvent) -> ApiResult<()> {
+    /// Claim a `dragstart` for the column drag machinery, returning `false`
+    /// (cancelling the native drag) when it did not originate on a
+    /// `draggable="true"` row or installation failed.
+    pub fn set_drag_image(&self, event: &DragEvent) -> bool {
+        match self.try_set_drag_image(event) {
+            Ok(true) => true,
+            Ok(false) => {
+                event.prevent_default();
+                if let Err(e) = clear_document_selection() {
+                    web_sys::console::warn_1(&e.into());
+                }
+
+                false
+            },
+            Err(e) => {
+                event.prevent_default();
+                web_sys::console::warn_1(&e.into());
+                false
+            },
+        }
+    }
+
+    fn try_set_drag_image(&self, event: &DragEvent) -> ApiResult<bool> {
         event.stop_propagation();
+        let Some(original) = closest_draggable(event) else {
+            return Ok(false);
+        };
+
+        let is_row_drag = event
+            .target()
+            .and_then(|target| target.dyn_into::<Node>().ok())
+            .map(|target| original.is_same_node(Some(&target)))
+            .unwrap_or(false);
+
+        if !is_row_drag {
+            return Ok(false);
+        }
+
+        self.register_source_dragend(event)?;
         if let Some(dt) = event.data_transfer() {
             dt.set_drop_effect("move");
         }
 
-        let original: HtmlElement = event.target().into_apierror()?.unchecked_into();
         let elem: HtmlElement = original
             .children()
             .get_with_index(0)
-            .unwrap()
+            .into_apierror()?
             .clone_node_with_deep(true)?
             .unchecked_into();
 
@@ -418,7 +626,7 @@ impl Presentation {
             Ok(())
         });
 
-        Ok(())
+        Ok(true)
     }
 
     /// Is the drag/drop state currently in `action`?
@@ -444,8 +652,7 @@ impl Presentation {
             _ => None,
         };
 
-        self.drag_target.borrow_mut().take();
-        *self.drag_state.borrow_mut() = DragState::NoDrag;
+        self.end_drag();
         if let Some(action) = action {
             self.drop_received.emit(action);
         }
@@ -469,11 +676,15 @@ impl Presentation {
     /// End the drag/drop action by resetting the state to default.
     pub fn notify_drag_end(&self) {
         if self.drag_state.borrow().is_drag_in_progress() {
-            self.drag_target.borrow_mut().take();
-            *self.drag_state.borrow_mut() = DragState::NoDrag;
-            if let Some(cb) = self.on_dragend.borrow().as_ref() {
-                cb.emit(());
-            }
+            self.end_drag();
+        }
+    }
+
+    fn end_drag(&self) {
+        self.drag_target.borrow_mut().take();
+        *self.drag_state.borrow_mut() = DragState::NoDrag;
+        if let Some(cb) = self.on_dragend.borrow().as_ref() {
+            cb.emit(());
         }
     }
 
@@ -481,6 +692,39 @@ impl Presentation {
     /// element so that drag-end cleanup fires even when Yew re-renders
     /// remove the original dragged element from the shadow DOM.  The host
     /// element is outside the virtual DOM and therefore stable.
+    fn register_source_dragend(&self, event: &DragEvent) -> ApiResult<()> {
+        let target = event.target().into_apierror()?;
+        if let Some((prev_target, prev)) = self.source_dragend.borrow_mut().take() {
+            let _ = prev_target
+                .remove_event_listener_with_callback("dragend", prev.as_ref().unchecked_ref());
+        }
+
+        let this = self.clone();
+        let closure = Closure::wrap(Box::new(move |_event: DragEvent| {
+            this.notify_drag_end();
+        }) as Box<dyn FnMut(DragEvent)>);
+
+        target.add_event_listener_with_callback("dragend", closure.as_ref().unchecked_ref())?;
+        *self.source_dragend.borrow_mut() = Some((target, closure));
+        Ok(())
+    }
+
+    fn register_host_pointerdown(&self) {
+        let closure = Closure::wrap(Box::new(move |event: PointerEvent| {
+            if closest_draggable(&event).is_some()
+                && let Err(e) = clear_document_selection()
+            {
+                web_sys::console::warn_1(&e.into());
+            }
+        }) as Box<dyn FnMut(PointerEvent)>);
+
+        self.viewer_elem
+            .add_event_listener_with_callback("pointerdown", closure.as_ref().unchecked_ref())
+            .unwrap();
+
+        *self.host_pointerdown.borrow_mut() = Some(closure);
+    }
+
     fn register_host_dragend(&self) {
         if let Some(prev) = self.host_dragend.borrow_mut().take() {
             let _ = self

@@ -28,7 +28,7 @@ use crate::py_err::ResultTClientErrorExt;
 use crate::server::Server;
 
 pub(crate) fn py_to_table_ref(val: &Bound<'_, PyAny>) -> PyResult<TableRef> {
-    if let Ok(t) = val.downcast::<Table>() {
+    if let Ok(t) = val.cast::<Table>() {
         let table_ref = t.borrow();
         Ok(TableRef::from(&*table_ref.0.table))
     } else if let Ok(name) = val.extract::<String>() {
@@ -52,7 +52,7 @@ pub(crate) fn parse_join_type(join_type: Option<&str>) -> PyResult<JoinType> {
     }
 }
 
-pub(crate) fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyObject {
+pub(crate) fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> Py<PyAny> {
     match scalar {
         Scalar::Float(x) => x.into_pyobject(py).unwrap().into_any().unbind(),
         Scalar::String(x) => x.into_pyobject(py).unwrap().into_any().unbind(),
@@ -68,7 +68,7 @@ pub(crate) trait PyFutureExt: Future {
         Self::Output: Ungil,
     {
         use pollster::FutureExt;
-        py.allow_threads(move || self.block_on())
+        py.detach(move || self.block_on())
     }
 }
 
@@ -165,7 +165,8 @@ impl Client {
     /// ```python
     /// table = client.table("x,y\n1,2\n3,4")
     /// ```
-    #[pyo3(signature = (input, limit=None, index=None, name=None, format=None, page_to_disk=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (input, limit=None, index=None, name=None, format=None, page_to_disk=None, list_flatten=None))]
     pub fn table(
         &self,
         py: Python<'_>,
@@ -175,10 +176,19 @@ impl Client {
         name: Option<Py<PyString>>,
         format: Option<Py<PyString>>,
         page_to_disk: Option<bool>,
+        list_flatten: Option<Py<PyString>>,
     ) -> PyResult<Table> {
         Ok(Table(
             self.0
-                .table(input, limit, index, name, format, page_to_disk)
+                .table(
+                    input,
+                    limit,
+                    index,
+                    name,
+                    format,
+                    page_to_disk,
+                    list_flatten,
+                )
                 .py_block_on(py)?,
         ))
     }
@@ -449,6 +459,14 @@ impl Table {
         table.schema().py_block_on(py)
     }
 
+    /// Validate a complete view config against this table and report the schema
+    /// a [`View`] built from it would have, WITHOUT creating one.
+    #[pyo3(signature = (**config))]
+    pub fn describe(&self, py: Python<'_>, config: Option<Py<PyDict>>) -> PyResult<Py<PyAny>> {
+        let table = self.0.clone();
+        table.describe(config).py_block_on(py)
+    }
+
     /// Validates the given expressions.
     pub fn validate_expressions(
         &self,
@@ -662,7 +680,14 @@ impl View {
     ///
     /// # Arguments
     ///
-    /// - `window` - a [`ViewWindow`]
+    /// - `window` - a [`ViewWindow`]; its `compression` key selects Arrow IPC
+    ///   body compression, `"lz4"` or `"zstd"` (uncompressed when omitted).
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// arrow = view.to_arrow(compression="zstd")
+    /// ```
     #[pyo3(signature = (**window))]
     pub fn to_arrow(&self, py: Python<'_>, window: Option<Py<PyDict>>) -> PyResult<Py<PyBytes>> {
         self.0.to_arrow(window).py_block_on(py)
@@ -725,7 +750,7 @@ impl View {
         &self,
         py: Python<'_>,
         column_name: String,
-    ) -> PyResult<(PyObject, PyObject)> {
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         self.0.get_min_max(column_name).py_block_on(py)
     }
 
@@ -814,5 +839,37 @@ impl View {
     /// ```
     pub fn remove_update(&self, py: Python<'_>, callback_id: u32) -> PyResult<()> {
         self.0.remove_update(callback_id).py_block_on(py)
+    }
+
+    /// Register a callback which is invoked whenever rows are removed from
+    /// this [`View`]'s [`Table`] by [`Table::remove`], with two arguments:
+    /// `port_id`,
+    /// and `indices`, the removed `index` column values as an Apache Arrow
+    /// (`bytes`) of one column named after the index.
+    ///
+    /// [`Table::replace`] reports the keys it does not re-supply and
+    /// [`Table::clear`] reports every key. It never fires for a
+    /// [`Table`] without an `index`.
+    ///
+    /// # Python Examples
+    ///
+    /// ```python
+    /// def on_remove(port_id, indices):
+    ///     replica.remove(indices)
+    ///
+    /// callback_id = view.on_remove(on_remove)
+    /// ```
+    pub fn on_remove(&self, py: Python<'_>, callback: Py<PyAny>) -> PyResult<u32> {
+        self.0.on_remove(callback).py_block_on(py)
+    }
+
+    /// Unregister a previously registered [`View::on_remove`] callback.
+    ///
+    /// # Arguments
+    ///
+    /// - `id` - A callback `id` as returned by a reciprocal call to
+    ///   [`View::on_remove`].
+    pub fn remove_remove(&self, py: Python<'_>, callback_id: u32) -> PyResult<()> {
+        self.0.remove_remove(callback_id).py_block_on(py)
     }
 }

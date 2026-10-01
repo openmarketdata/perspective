@@ -12,9 +12,192 @@
 
 #include <perspective/computed_expression.h>
 
+#include <cstdint>
+#include <functional>
 #include <utility>
 
 namespace perspective {
+
+namespace {
+
+// Runtime guards for the single-shot `expression.value()` calls in
+// `precompute()` / `get_dtype()`. ExprTk only emits its bounds-checked
+// `*_rtc_node` AST variants when a check is registered on the parser at
+// compile() time, so these must NEVER be registered on the parser owned by
+// `t_computed_expression` -- `compute()` must keep the unchecked node
+// variants on the per-row path, which is only ever reached by expressions
+// that already passed validation.
+
+// Out-of-range dynamic vector access (e.g. `v[i]` where `i` is only known
+// at eval time) traps or silently corrupts the heap without this check.
+struct t_validation_vector_access_check
+    : exprtk::vector_access_runtime_check {
+    bool
+    handle_runtime_violation(violation_context& /*context*/) override {
+        // Returning false clamps the access to the vector's base element,
+        // so evaluation completes harmlessly; the flag turns the result
+        // into a validation error afterwards. The base impl throws.
+        m_violation = true;
+        return false;
+    }
+
+    bool m_violation = false;
+};
+
+// Iteration budget, so a mid-edit `while (1 > 0) {}` fails validation
+// instead of hanging the engine.
+struct t_validation_loop_check : exprtk::loop_runtime_check {
+    explicit t_validation_loop_check(std::uint64_t budget) :
+        m_remaining(budget) {
+        loop_set = e_all_loops;
+        max_loop_iterations = budget;
+    }
+
+    // ExprTk's own `max_loop_iterations` is per loop *entry*, which nested
+    // loops multiply; this virtual is consulted on every iteration of every
+    // loop, so it enforces the budget cumulatively across the whole
+    // evaluation.
+    bool
+    check() override {
+        if (m_remaining == 0) {
+            return false;
+        }
+        --m_remaining;
+        return true;
+    }
+
+    void
+    handle_runtime_violation(const violation_context& /*context*/) override {
+        // Must not throw (the base impl does): returning normally lets the
+        // loop node terminate via check() == false and evaluation completes
+        // cleanly, with every subsequent loop entry short-circuiting.
+        m_violation = true;
+    }
+
+    std::uint64_t m_remaining;
+    bool m_violation = false;
+};
+
+// Generous for any sane single-row evaluation, small enough to keep a
+// pathological validation bounded well under a second.
+constexpr std::uint64_t VALIDATION_MAX_LOOP_ITERATIONS = 1000000;
+
+// Registration is parser-wide state; scope it strictly to the validation
+// compile + value() call so no other compile on this parser can observe it.
+struct t_validation_check_guard {
+    PSP_NON_COPYABLE(t_validation_check_guard);
+
+    t_validation_check_guard(
+        exprtk::parser<t_tscalar>& parser,
+        t_validation_vector_access_check& vector_check,
+        t_validation_loop_check& loop_check
+    ) :
+        m_parser(parser) {
+        m_parser.register_vector_access_runtime_check(vector_check);
+        m_parser.register_loop_runtime_check(loop_check);
+    }
+
+    ~t_validation_check_guard() {
+        m_parser.clear_vector_access_runtime_check();
+        m_parser.clear_loop_runtime_check();
+    }
+
+    exprtk::parser<t_tscalar>& m_parser;
+};
+
+/**
+ * @brief Best-effort line/column of a recorded type error within the parsed
+ * expression, from the first operator token whose operands carry the
+ * offending dtypes.
+ */
+bool
+locate_type_error(
+    const expr::t_expression_type_error& type_error,
+    const std::string& parsed_expression_string,
+    const std::function<t_dtype(const std::string&)>& symbol_dtype,
+    t_expression_error& error
+) {
+    exprtk::lexer::generator lexer;
+    if (!lexer.process(parsed_expression_string)) {
+        return false;
+    }
+
+    const std::size_t npos = std::numeric_limits<std::size_t>::max();
+    const std::size_t num_tokens = lexer.size();
+    std::size_t fallback = npos;
+    std::size_t position = npos;
+
+    auto token_dtype = [&](const exprtk::lexer::token& tok) -> t_dtype {
+        if (tok.type == exprtk::lexer::token::e_number) {
+            return DTYPE_FLOAT64;
+        }
+        if (tok.type == exprtk::lexer::token::e_symbol) {
+            return symbol_dtype(tok.value);
+        }
+        return DTYPE_NONE;
+    };
+
+    auto prev_operand = [&](std::size_t idx) -> t_dtype {
+        while (idx > 0) {
+            const exprtk::lexer::token& tok = lexer[idx - 1];
+            if (tok.type != exprtk::lexer::token::e_rbracket) {
+                return token_dtype(tok);
+            }
+            --idx;
+        }
+        return DTYPE_NONE;
+    };
+
+    auto next_operand = [&](std::size_t idx) -> t_dtype {
+        while (idx + 1 < num_tokens) {
+            const exprtk::lexer::token& tok = lexer[idx + 1];
+            if (tok.type != exprtk::lexer::token::e_lbracket) {
+                return token_dtype(tok);
+            }
+            ++idx;
+        }
+        return DTYPE_NONE;
+    };
+
+    for (std::size_t i = 0; i < num_tokens; ++i) {
+        const exprtk::lexer::token& tok = lexer[i];
+        if (tok.value != type_error.m_op) {
+            continue;
+        }
+
+        if (fallback == npos) {
+            fallback = tok.position;
+        }
+
+        if (prev_operand(i) == type_error.m_lhs
+            && next_operand(i) == type_error.m_rhs) {
+            position = tok.position;
+            break;
+        }
+    }
+
+    if (position == npos) {
+        position = fallback;
+    }
+
+    if (position == npos) {
+        return false;
+    }
+
+    exprtk::parser_error::type parser_error;
+    parser_error.token.position = position;
+    if (!exprtk::parser_error::update_error(
+            parser_error, parsed_expression_string
+        )) {
+        return false;
+    }
+
+    error.m_line = parser_error.line_no;
+    error.m_column = parser_error.column_no;
+    return true;
+}
+
+} // namespace
 
 computed_function::bucket t_computed_expression_parser::BUCKET_FN =
     computed_function::bucket();
@@ -84,6 +267,8 @@ t_tscalar t_computed_expression_parser::TRUE_SCALAR = mktscalar(true);
 
 t_tscalar t_computed_expression_parser::FALSE_SCALAR = mktscalar(false);
 
+t_tscalar t_computed_expression_parser::NONE_SCALAR = mknone();
+
 /******************************************************************************
  *
  * t_computed_expression
@@ -102,6 +287,27 @@ t_computed_expression::t_computed_expression(
     m_column_ids(column_ids),
     m_dtype(dtype) {}
 
+struct t_computed_expression_cache {
+    t_computed_expression_cache() = default;
+    t_computed_expression_cache(const t_computed_expression_cache&) = delete;
+    t_computed_expression_cache& operator=(const t_computed_expression_cache&) =
+        delete;
+    t_computed_expression_cache(t_computed_expression_cache&&) = delete;
+    t_computed_expression_cache& operator=(t_computed_expression_cache&&) =
+        delete;
+
+    std::shared_ptr<t_data_table> m_current_source_table;
+    t_uindex m_row_idx{0};
+    std::vector<std::pair<std::string, t_tscalar>> m_values;
+    std::vector<std::shared_ptr<t_column>> m_columns;
+    std::vector<t_dtype> m_input_dtypes;
+    exprtk::symbol_table<t_tscalar> m_sym_table;
+    exprtk::expression<t_tscalar> m_expr;
+    std::unique_ptr<t_computed_function_store> m_function_store;
+};
+
+t_computed_expression::~t_computed_expression() = default;
+
 void
 t_computed_expression::compute(
     const std::shared_ptr<t_data_table>& source_table,
@@ -110,53 +316,94 @@ t_computed_expression::compute(
     t_expression_vocab& vocab,
     t_regex_mapping& regex_mapping
 ) const {
-    // TODO: share symtables across pre/re/compute
-    exprtk::symbol_table<t_tscalar> sym_table;
-
-    // pi, infinity, etc.
-    sym_table.add_constants();
-
-    t_uindex row_idx = 0;
-
-    // Create a function store, with is_type_validator set to false as we
-    // are calculating values, not type-checking.
-    t_computed_function_store function_store(
-        vocab, regex_mapping, false, source_table, pkey_map, row_idx
-    );
-    function_store.register_computed_functions(sym_table);
-
-    exprtk::expression<t_tscalar> expr_definition;
-    std::vector<std::pair<std::string, t_tscalar>> values;
-    tsl::hopscotch_map<std::string, std::shared_ptr<t_column>> columns;
-
     auto num_input_columns = m_column_ids.size();
-    values.resize(num_input_columns);
-    columns.reserve(num_input_columns);
 
-    for (t_uindex cidx = 0; cidx < num_input_columns; ++cidx) {
-        const std::string& column_id = m_column_ids[cidx].first;
-        const std::string& column_name = m_column_ids[cidx].second;
-        columns[column_id] = source_table->get_column(column_name);
-
-        t_tscalar rval;
-        rval.clear();
-        rval.m_type = columns[column_id]->get_dtype();
-
-        values[cidx] = std::pair<std::string, t_tscalar>(column_id, rval);
-        sym_table.add_variable(column_id, values[cidx].second);
+    bool needs_build = !m_cache;
+    if (!needs_build) {
+        for (t_uindex cidx = 0; cidx < num_input_columns; ++cidx) {
+            const std::string& column_name = m_column_ids[cidx].second;
+            if (source_table->get_column(column_name)->get_dtype()
+                != m_cache->m_input_dtypes[cidx]) {
+                needs_build = true;
+                break;
+            }
+        }
     }
 
-    expr_definition.register_symbol_table(sym_table);
+    if (needs_build) {
+        m_cache = std::make_unique<t_computed_expression_cache>();
+        auto& cache = *m_cache;
 
-    if (!m_computed_expression_parser.m_parser->compile(
-            m_parsed_expression_string, expr_definition
-        )) {
-        std::stringstream ss;
-        ss << "[t_computed_expression::compute] Failed to parse expression: `"
-           << m_parsed_expression_string << "`, failed with error: "
-           << m_computed_expression_parser.m_parser->error() << '\n';
+        cache.m_current_source_table = source_table;
+        cache.m_sym_table.add_constants(); // pi, infinity, etc.
 
-        PSP_COMPLAIN_AND_ABORT(ss.str());
+        // is_type_validator = false: we are computing values, not type-checking.
+        cache.m_function_store = std::make_unique<t_computed_function_store>(
+            vocab,
+            regex_mapping,
+            false,
+            cache.m_current_source_table,
+            pkey_map,
+            cache.m_row_idx
+        );
+        cache.m_function_store->register_computed_functions(cache.m_sym_table);
+
+        // Size exactly once; the symbol table binds a T* into each
+        // m_values[cidx].second, so this storage must never be reallocated.
+        cache.m_values.resize(num_input_columns);
+        cache.m_columns.resize(num_input_columns);
+        cache.m_input_dtypes.resize(num_input_columns);
+
+        for (t_uindex cidx = 0; cidx < num_input_columns; ++cidx) {
+            const std::string& column_id = m_column_ids[cidx].first;
+            const std::string& column_name = m_column_ids[cidx].second;
+            t_dtype dtype = source_table->get_column(column_name)->get_dtype();
+
+            cache.m_input_dtypes[cidx] = dtype;
+
+            t_tscalar rval;
+            rval.clear();
+            rval.m_type = dtype;
+
+            cache.m_values[cidx] =
+                std::pair<std::string, t_tscalar>(column_id, rval);
+            cache.m_sym_table.add_variable(
+                column_id, cache.m_values[cidx].second
+            );
+        }
+
+        cache.m_expr.register_symbol_table(cache.m_sym_table);
+
+        // Load-bearing for compile-once: exprtk constant-folds an all-literal
+        // function call (e.g. intern('x'), concat('a','b')) to a literal node at
+        // compile time ONLY when the function reports no side effects. Our
+        // functions inherit the igeneric_function/ifunction default
+        // has_side_effects() == true and never call disable_has_side_effects(),
+        // so such calls are not folded and re-evaluate on every value(). If a
+        // future exprtk bump flips that default, the first call's result would
+        // be frozen into the cached AST -- revisit this cache if so.
+        if (!m_computed_expression_parser.m_parser->compile(
+                m_parsed_expression_string, cache.m_expr
+            )) {
+            std::stringstream ss;
+            ss << "[t_computed_expression::compute] Failed to parse "
+                  "expression: `"
+               << m_parsed_expression_string << "`, failed with error: "
+               << m_computed_expression_parser.m_parser->error() << '\n';
+
+            PSP_COMPLAIN_AND_ABORT(ss.str());
+        }
+    }
+
+    auto& cache = *m_cache;
+
+    // Re-point the per-call inputs the compiled function objects read through
+    // (the source table differs across the master/flattened/delta/prev/current
+    // tables within a single update), and re-fetch this call's source columns.
+    cache.m_current_source_table = source_table;
+    for (t_uindex cidx = 0; cidx < num_input_columns; ++cidx) {
+        cache.m_columns[cidx] =
+            source_table->get_column(m_column_ids[cidx].second);
     }
 
     // create or get output column using m_expression_alias
@@ -167,12 +414,13 @@ t_computed_expression::compute(
 
     for (t_uindex ridx = 0; ridx < num_rows; ++ridx) {
         for (t_uindex cidx = 0; cidx < num_input_columns; ++cidx) {
-            const std::string& column_id = m_column_ids[cidx].first;
-            values[cidx].second.set(columns[column_id]->get_scalar(ridx));
+            cache.m_values[cidx].second.set(
+                cache.m_columns[cidx]->get_scalar(ridx)
+            );
         }
-        row_idx = ridx;
+        cache.m_row_idx = ridx;
 
-        t_tscalar value = expr_definition.value();
+        t_tscalar value = cache.m_expr.value();
 
         if (!value.is_valid() || value.is_none()) {
             output_column->clear(ridx);
@@ -182,7 +430,8 @@ t_computed_expression::compute(
         output_column->set_scalar(ridx, value);
     }
 
-    function_store.clear_computed_function_state();
+    // order()'s accumulator must still be reset at the end of every call.
+    cache.m_function_store->clear_computed_function_state();
 };
 
 const std::string&
@@ -297,6 +546,10 @@ t_computed_expression_parser::precompute(
         sym_table.add_variable(column_id, values[cidx]);
     }
 
+    t_validation_vector_access_check vector_check;
+    t_validation_loop_check loop_check(VALIDATION_MAX_LOOP_ITERATIONS);
+    const t_validation_check_guard guard(*m_parser, vector_check, loop_check);
+
     exprtk::expression<t_tscalar> expr_definition;
     expr_definition.register_symbol_table(sym_table);
 
@@ -309,8 +562,33 @@ t_computed_expression_parser::precompute(
         PSP_COMPLAIN_AND_ABORT(ss.str());
     }
 
-    t_tscalar v = expr_definition.value();
+    expr::t_expression_type_check_sink type_errors;
+    t_tscalar v;
+    {
+        const expr::t_expression_type_check_scope type_check_scope(type_errors);
+        v = expr_definition.value();
+    }
     function_store.clear_computed_function_state();
+
+    if (vector_check.m_violation || loop_check.m_violation) {
+        std::stringstream ss;
+        ss << "[t_computed_expression_parser::precompute] Runtime error in "
+              "expression: `"
+           << parsed_expression_string << "`, "
+           << (vector_check.m_violation
+                   ? "vector index out of bounds"
+                   : "exceeded maximum loop iterations")
+           << '\n';
+        PSP_COMPLAIN_AND_ABORT(ss.str());
+    }
+
+    if (!type_errors.m_errors.empty()) {
+        std::stringstream ss;
+        ss << "[t_computed_expression_parser::precompute] "
+           << expr::describe_type_error(type_errors.m_errors.front())
+           << " in expression: `" << parsed_expression_string << "`\n";
+        PSP_COMPLAIN_AND_ABORT(ss.str());
+    }
 
     return std::make_shared<t_computed_expression>(
         expression_alias,
@@ -387,6 +665,10 @@ t_computed_expression_parser::get_dtype(
         sym_table.add_variable(column_id, values[cidx]);
     }
 
+    t_validation_vector_access_check vector_check;
+    t_validation_loop_check loop_check(VALIDATION_MAX_LOOP_ITERATIONS);
+    const t_validation_check_guard guard(*m_parser, vector_check, loop_check);
+
     exprtk::expression<t_tscalar> expr_definition;
     expr_definition.register_symbol_table(sym_table);
 
@@ -422,10 +704,55 @@ t_computed_expression_parser::get_dtype(
         return DTYPE_NONE;
     }
 
-    t_tscalar v = expr_definition.value();
+    expr::t_expression_type_check_sink type_errors;
+    t_tscalar v;
+    {
+        const expr::t_expression_type_check_scope type_check_scope(type_errors);
+        v = expr_definition.value();
+    }
     t_dtype dtype = v.get_dtype();
 
     function_store.clear_computed_function_state();
+
+    if (vector_check.m_violation) {
+        error.m_error_message = "Runtime Error - Vector index out of bounds.";
+        error.m_line = 0;
+        error.m_column = 0;
+        return DTYPE_NONE;
+    }
+
+    if (loop_check.m_violation) {
+        error.m_error_message =
+            "Runtime Error - Exceeded maximum loop iterations.";
+        error.m_line = 0;
+        error.m_column = 0;
+        return DTYPE_NONE;
+    }
+
+    if (!type_errors.m_errors.empty()) {
+        const expr::t_expression_type_error& type_error =
+            type_errors.m_errors.front();
+        error.m_error_message = expr::describe_type_error(type_error);
+        error.m_line = 0;
+        error.m_column = 0;
+
+        auto symbol_dtype = [&](const std::string& symbol) -> t_dtype {
+            if (symbol == "True" || symbol == "False") {
+                return DTYPE_BOOL;
+            }
+            for (const auto& column_id : column_ids) {
+                if (column_id.first == symbol) {
+                    return schema.get_dtype(column_id.second);
+                }
+            }
+            return DTYPE_NONE;
+        };
+
+        locate_type_error(
+            type_error, parsed_expression_string, symbol_dtype, error
+        );
+        return DTYPE_NONE;
+    }
 
     if (v.m_status == STATUS_CLEAR || dtype == DTYPE_NONE) {
         error.m_error_message =
@@ -613,6 +940,7 @@ t_computed_function_store::register_computed_functions(
     // And scalar constants
     sym_table.add_constant("True", t_computed_expression_parser::TRUE_SCALAR);
     sym_table.add_constant("False", t_computed_expression_parser::FALSE_SCALAR);
+    sym_table.add_constant("None", t_computed_expression_parser::NONE_SCALAR);
 }
 
 void

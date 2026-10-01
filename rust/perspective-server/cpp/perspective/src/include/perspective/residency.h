@@ -43,8 +43,9 @@ PERSPECTIVE_EXPORT extern std::uint64_t g_residency_tick;
  * exists — see the safepoint audit), and restoration is lazy via
  * `ensure_resident()` on every `t_lstore` data accessor.
  *
- * Disabled by default (zero overhead). Enabled by setting the `PSP_MEMORY_BUDGET`
- * environment variable (bytes), re-read at each safepoint.
+ * Configured by the `PSP_MEMORY_BUDGET` environment variable in bytes (`0`
+ * disables), re-read at each safepoint, with WASM falling back to the
+ * compile-time `PSP_WASM_MEMORY_BUDGET` (1 GiB) when it is unset.
  */
 class PERSPECTIVE_EXPORT t_residency_manager {
 public:
@@ -81,13 +82,10 @@ private:
     std::uint64_t m_evictions = 0;
     std::uint64_t m_restores = 0;
     std::unordered_set<t_lstore*> m_stores;
-    // Victims selected by `prepare()`, evicted by `commit()`. Held between the
-    // two phases while the JS driver opens their OPFS handles. `m_pending_fnames`
-    // owns stable C-strings for `victim_fname()` (a `t_lstore::get_fname()` temp
-    // would dangle).
     std::vector<t_lstore*> m_pending;
     std::vector<std::string> m_pending_fnames;
     std::mutex m_mutex;
+    std::mutex m_safepoint_mutex;
 };
 
 } // namespace perspective

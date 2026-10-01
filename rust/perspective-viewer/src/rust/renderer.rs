@@ -18,7 +18,9 @@
 //! references throughout the application.
 
 mod activate;
+mod dispatch;
 pub mod limits;
+mod plugin_config;
 mod plugin_store;
 mod props;
 mod registry;
@@ -26,17 +28,11 @@ mod render_timer;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::future::Future;
 use std::ops::Deref;
-use std::pin::Pin;
 use std::rc::Rc;
 
-use futures::future::{join_all, select_all};
-use perspective_client::config::ViewConfig;
-use perspective_client::utils::*;
-use perspective_client::{View, ViewWindow};
-use perspective_js::utils::{ApiResult, JsValueSerdeExt, ResultTApiErrorExt};
-use serde_json::Value;
+use perspective_client::ViewWindow;
+use perspective_js::utils::{ApiFuture, ApiResult, JsValueSerdeExt};
 use wasm_bindgen::prelude::*;
 use web_sys::*;
 use yew::html::ImplicitClone;
@@ -44,35 +40,69 @@ use yew::prelude::*;
 
 use self::activate::*;
 pub use self::limits::RenderLimits;
-use self::limits::*;
+pub use self::plugin_config::{
+    ColumnConfigMap, PluginScopedConfig, ValidatedColumnsConfig, ValidatedPluginConfig,
+    apply_columns_config_to, apply_plugin_config_to,
+};
 use self::plugin_store::*;
 pub use self::props::RendererProps;
 pub use self::registry::*;
 use self::render_timer::*;
 use crate::config::*;
 use crate::js::plugin::*;
-use crate::queries::resolve_abs_max;
-use crate::session::Session;
+use crate::session::{PanelCell, PluginRef};
 use crate::utils::*;
 
-/// A per-column config map. Each inner [`serde_json::Map`] is a flat collection
-/// of plugin-defined JSON keys whose shape is dictated by the active plugin's
-/// [`crate::config::ColumnConfigSchema`].
-pub type ColumnConfigMap = HashMap<String, serde_json::Map<String, serde_json::Value>>;
+/// Minimum geometry delta (px) considered a real size/position change by the
+/// presize paths.
+pub(crate) const SUBPIXEL_EPSILON: f64 = 0.5;
 
-/// Per-plugin config bucket. Holds the per-column style map and the
-/// plugin-level config map for one plugin. Buckets are keyed by plugin
-/// name in [`RendererMutData::plugin_states`], so foreign keys from a
-/// different plugin physically cannot appear in the active plugin's
-/// bucket.
-#[derive(Clone, Debug, Default)]
-pub struct PluginScopedConfig {
-    pub columns: ColumnConfigMap,
-    pub plugin: serde_json::Map<String, serde_json::Value>,
+/// One queued geometry task for the [`RendererData::geometry_slot`] runner.
+/// `Measure` re-measures the plugin's live box (reactive resize); `Presize`
+/// renders an anticipated box ahead of a layout commit. A later command
+/// subsumes an earlier unconsumed one: `Measure` reflects whatever geometry
+/// has committed by run time, and `Presize` anticipates the NEXT commit —
+/// callers issue them in commit order.
+#[derive(Clone, Copy)]
+pub(crate) enum GeometryCmd {
+    Measure,
+    Presize {
+        translate: Option<(f64, f64)>,
+        width: f64,
+        height: f64,
+    },
+}
+
+/// Everything a plugin may read back during its render, all belonging to
+/// one snapshot (invariant I5). Built once per bound `View` by the render
+/// pipeline and CACHED on the `Renderer`; pinning it for a run is an `Rc`
+/// clone (cheap enough for resize-tick-rate runs). While pinned, the
+/// per-panel element getters (`getViewConfigPanel`, `getTablePanel`,
+/// `getClientPanel`, `getEditPortPanel`) answer from it — the plugin ABI is
+/// inside the snapshot boundary.
+pub struct RenderContext {
+    pub view_config: Rc<perspective_client::config::ViewConfig>,
+    pub view: perspective_client::View,
+    pub table: perspective_client::Table,
+    pub client: perspective_client::Client,
+    pub edit_port: Option<f64>,
+    pub theme: Option<String>,
+}
+
+/// RAII pin for a [`RenderContext`] — cleared on drop, INCLUDING error
+/// exits, so a failed run can't leak a stale context.
+pub struct ContextPin(Renderer);
+
+impl Drop for ContextPin {
+    fn drop(&mut self) {
+        self.0.0.active_context.borrow_mut().take();
+    }
 }
 
 /// Immutable state
 pub struct RendererData {
+    /// This panel's committed [`PanelState`].
+    cell: PanelCell,
     plugin_data: RefCell<RendererMutData>,
     draw_lock: DebounceMutex,
     pub plugin_changed: PubSub<JsPerspectiveViewerPlugin>,
@@ -88,26 +118,99 @@ pub struct RendererData {
     /// plugin's bucket.
     pub plugin_config_changed: PubSub<serde_json::Map<String, serde_json::Value>>,
 
+    /// Fires after the active plugin's per-column bucket changes by any path
+    /// (edit, restore or reset), unlike `column_style_changed` which covers
+    /// edits only.
+    pub columns_config_changed: PubSub<ColumnConfigMap>,
+
     /// `true` while the active plugin's "rendering N of M" warning is
     /// dismissable.
     pub render_warning: Cell<bool>,
 
+    /// Count of in-flight [`Renderer::resize_with_dimensions`] /
+    /// [`Renderer::presize_with_box`] presize calls.
+    presize_pending: Cell<u32>,
+
+    /// The `(width, height)` the plugin last painted at through a presize,
+    /// consumed by the post-commit reactive resize.
+    presized_box: Cell<Option<(f64, f64)>>,
+
+    /// Debounce slot for geometry tasks (`resize` / presize), separate from
+    /// the default slot data-update redraws coalesce on. Invariant: a
+    /// geometry request must never resolve via a parked DATA task — a
+    /// pending update's redraw renders at the worker's current dimensions
+    /// and cannot subsume a size change (the drag-during-updates permanent
+    /// skew).
+    geometry_slot: DebounceSlot,
+
+    /// Latest-wins parameter cell for the geometry slot, consumed by the
+    /// runner AT RUN TIME under the lock. Parameters live here rather than
+    /// in runner captures so a parked runner can never act on a stale
+    /// target when later calls coalesced onto it.
+    geometry_cmd: Cell<Option<GeometryCmd>>,
+
     /// Fires after every draw/update with the computed render limits.
     pub on_render_limits_changed: RefCell<Option<Callback<RenderLimits>>>,
+
+    /// The layout slot name (panel id) under which this renderer mounts its
+    /// plugin in the viewer's light DOM, so multiple panels' plugins can
+    /// coexist there.
+    slot_name: RefCell<Option<String>>,
+
+    /// Whether the active plugin has completed a draw. An EXPLICIT flag —
+    /// not inferred from DOM connectedness — because plugin elements may be
+    /// mounted eagerly (at panel creation / draw start, before the view
+    /// query resolves), so "in the DOM" no longer implies "has rendered".
+    /// Set by a successful `draw_view`; cleared on plugin swap
+    /// (`activate_committed_plugin`), `dispose` and `delete`.
+    has_drawn: Cell<bool>,
+
+    /// The effective theme stamped at the active plugin's last `--psp-*`
+    /// CSS CAPTURE — its first paint ([`Renderer::draw_view`]) or last
+    /// [`Renderer::restyle_all`].
+    captured_theme: RefCell<Option<Option<String>>>,
+
+    /// The [`RenderContext`] of the currently-bound `View` (built at bind
+    /// time by the pipeline). Cleared on `dispose`/`delete`.
+    cached_context: RefCell<Option<Rc<RenderContext>>>,
+
+    /// The [`RenderContext`] pinned by the run currently holding the draw
+    /// lock, if any (invariant I5). Managed by [`ContextPin`].
+    active_context: RefCell<Option<Rc<RenderContext>>>,
+
+    /// Whether this renderer's panel is the workspace's ACTIVE panel. Pure
+    /// DATA, written synchronously by `Workspace::set_active`/`insert_panel`;
+    /// the `active` CSS class it drives is applied ONLY inside locked plugin
+    /// dispatches ([`Renderer::stamp_active`], "stamp before draw" — like the
+    /// theme), so activation-dependent chrome and the DOM it styles always
+    /// land in one paint commit.
+    is_active_panel: Cell<bool>,
+
+    /// Whether this renderer's panel is the workspace's ONLY panel. Pure DATA
+    /// like [`Self::is_active_panel`], written synchronously by the
+    /// `Workspace` panel-count mutation sites (`new`/`insert_panel`/
+    /// `remove_panel`); the `single`/`multi` CSS classes it drives are
+    /// applied ONLY inside locked plugin dispatches
+    /// ([`Renderer::stamp_active`]), for the same one-paint-commit reason.
+    is_solo_panel: Cell<bool>,
+
+    /// A `table_updated` redraw was DROPPED because this panel's plugin was
+    /// hidden (an unslotted tab-stack panel — see
+    /// `tasks::create_panel::wire_panel_render_sub`), so the plugin's
+    /// retained frame no longer reflects the bound `View`'s data. The
+    /// activation nudge consumes it to dispatch a full `plugin.update`
+    /// instead of the usual chrome-only `resize` repaint. Cleared at every
+    /// `draw_view` dispatch — set BEFORE the plugin's data fetch, so an
+    /// update landing mid-draw re-marks it and can never be lost.
+    data_stale: Cell<bool>,
 }
 
 /// Mutable state
 pub struct RendererMutData {
     viewer_elem: HtmlElement,
-    metadata: Rc<PluginStaticConfig>,
     plugin_store: PluginStore,
-    plugins_idx: Option<usize>,
     timer: MovingWindowRenderTimer,
     selection: Option<ViewWindow>,
-    pending_plugin: Option<usize>,
-
-    /// Per-plugin config buckets, keyed by plugin name.
-    plugin_states: HashMap<String, PluginScopedConfig>,
 }
 
 /// The state object responsible for the active [`JsPerspectiveViewerPlugin`].
@@ -138,51 +241,164 @@ impl Deref for RendererData {
     }
 }
 
-type TaskResult = ApiResult<JsValue>;
-type TimeoutTask<'a> = Pin<Box<dyn Future<Output = Option<TaskResult>> + 'a>>;
-
-/// How long to await a call to the plugin's `draw()` before resizing.
-static PRESIZE_TIMEOUT: i32 = 500;
-
 impl Renderer {
-    pub fn new(viewer_elem: &HtmlElement) -> Self {
+    pub fn new(viewer_elem: &HtmlElement, cell: PanelCell) -> Self {
+        let draw_lock = DebounceMutex::default();
         Self(Rc::new(RendererData {
+            cell,
             plugin_data: RefCell::new(RendererMutData {
                 viewer_elem: viewer_elem.clone(),
-                metadata: Rc::new(PluginStaticConfig::default()),
                 plugin_store: PluginStore::default(),
-                plugins_idx: None,
                 selection: None,
                 timer: MovingWindowRenderTimer::default(),
-                pending_plugin: None,
-                plugin_states: HashMap::default(),
             }),
-            draw_lock: Default::default(),
+            geometry_slot: draw_lock.slot(),
+            geometry_cmd: Cell::new(None),
+            draw_lock,
             plugin_changed: Default::default(),
             style_changed: Default::default(),
             reset_changed: Default::default(),
             selection_changed: Default::default(),
             column_style_changed: Default::default(),
             plugin_config_changed: Default::default(),
+            columns_config_changed: Default::default(),
             render_warning: Cell::new(true),
+            presize_pending: Cell::new(0),
+            presized_box: Cell::new(None),
             on_render_limits_changed: Default::default(),
+            slot_name: Default::default(),
+            has_drawn: Cell::new(false),
+            captured_theme: Default::default(),
+            cached_context: Default::default(),
+            active_context: Default::default(),
+            is_active_panel: Cell::new(false),
+            is_solo_panel: Cell::new(true),
+            data_stale: Cell::new(false),
         }))
     }
 
-    pub fn delete(&self) -> ApiResult<()> {
-        self.get_active_plugin().map(|x| x.delete()).unwrap_or_log();
-        self.plugin_data.borrow().viewer_elem.set_inner_text("");
-        let new_state = Self::new(&self.plugin_data.borrow().viewer_elem);
-        std::mem::swap(
-            &mut *self.plugin_data.borrow_mut(),
-            &mut *new_state.plugin_data.borrow_mut(),
-        );
+    /// Set the layout slot name (panel id) under which this renderer mounts its
+    /// plugin in the viewer's light DOM, routed through the matching
+    /// `<regular-layout>` forwarding slot.
+    pub fn set_slot_name(&self, name: &str) {
+        *self.0.slot_name.borrow_mut() = Some(name.to_owned());
+    }
 
+    /// The layout slot name (panel id) for this renderer's plugin, if assigned.
+    pub fn slot_name(&self) -> Option<String> {
+        self.0.slot_name.borrow().clone()
+    }
+
+    /// Set this panel's theme name. Callers must pass a CONCRETE name —
+    /// resolve "the default" through `Presentation` before calling, never by
+    /// leaving this empty.
+    pub fn set_theme(&self, name: Option<String>) {
+        self.cell.submit_theme(name);
+    }
+
+    /// Write this panel's theme name NOW.
+    pub fn commit_theme(&self, name: Option<String>) {
+        self.cell.swap(self.cell.state().with_theme(name));
+    }
+
+    /// [`Self::commit_theme`] plus a synchronous [`Self::stamp_theme`].
+    pub fn commit_theme_stamped(&self, theme: Option<String>) {
+        self.commit_theme(theme);
+        self.stamp_theme(None);
+    }
+
+    /// This panel's theme name, as the UI sees it: the committed theme, or the
+    /// latest pending pick.
+    pub fn theme(&self) -> Option<String> {
+        self.cell.projected_theme()
+    }
+
+    /// [`Self::set_theme`] plus a synchronous [`Self::stamp_theme`] — the
+    /// shared "stamp-with-commit" head of every per-panel theme mutation
+    /// site.
+    pub fn set_theme_stamped(&self, theme: Option<String>) {
+        self.set_theme(theme);
+        self.stamp_theme(None);
+    }
+
+    /// Whether the active plugin's captured `--psp-*` CSS is STALE — the
+    /// effective theme differs from the one stamped at the plugin's last
+    /// CSS capture (first paint / last restyle).
+    pub fn needs_restyle(&self) -> bool {
+        match &*self.0.captured_theme.borrow() {
+            Some(captured) => *captured != self.theme(),
+            None => false,
+        }
+    }
+
+    /// Dispose a single panel's renderer: delete its active plugin and remove
+    /// this panel's element(s) from the viewer's light DOM, scoped by
+    /// `slot_name` so sibling panels are untouched (unlike
+    /// [`Self::delete`], which clears the entire light DOM). Removes the
+    /// plugin (`slot=<id>`) and any panel-scoped aux element it mounted
+    /// (e.g. the datagrid toolbar, `slot=statusbar-extra-<id>`).
+    pub fn dispose(&self) -> ApiFuture<()> {
+        self.0.has_drawn.set(false);
+        self.0.captured_theme.borrow_mut().take();
+        self.0.cached_context.borrow_mut().take();
+        let this = self.clone();
+        ApiFuture::new(async move {
+            let renderer = this.clone();
+            this.with_lock(async move {
+                if let Some(plugin) = renderer.active_plugin() {
+                    plugin.delete();
+                }
+
+                let Some(slot) = renderer.slot_name() else {
+                    return Ok(());
+                };
+
+                let viewer = renderer.plugin_data.borrow().viewer_elem.clone();
+                let slots = [slot.clone(), format!("statusbar-extra-{slot}")];
+                let children = viewer.children();
+                let mut idx = children.length();
+                while idx > 0 {
+                    idx -= 1;
+                    if let Some(el) = children.item(idx)
+                        && el.get_attribute("slot").is_some_and(|s| slots.contains(&s))
+                    {
+                        let _ = viewer.remove_child(&el);
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+        })
+    }
+
+    pub fn delete(&self) -> ApiResult<()> {
+        self.0.has_drawn.set(false);
+        self.0.captured_theme.borrow_mut().take();
+        self.0.cached_context.borrow_mut().take();
+        if let Some(plugin) = self.active_plugin() {
+            plugin.delete();
+        }
+        self.plugin_data.borrow().viewer_elem.set_inner_text("");
+        let viewer_elem = self.plugin_data.borrow().viewer_elem.clone();
+        *self.plugin_data.borrow_mut() = RendererMutData {
+            viewer_elem,
+            plugin_store: PluginStore::default(),
+            selection: None,
+            timer: MovingWindowRenderTimer::default(),
+        };
+
+        self.cell.swap(self.cell.state().without_plugins());
         Ok(())
     }
 
     pub fn metadata(&self) -> Rc<PluginStaticConfig> {
-        self.borrow().metadata.clone()
+        self.cell
+            .state()
+            .plugin
+            .as_ref()
+            .map(|plugin| plugin.static_config.clone())
+            .unwrap_or_default()
     }
 
     pub fn is_chart(&self) -> bool {
@@ -194,485 +410,9 @@ impl Renderer {
         self.metadata().can_render_column_styles
     }
 
-    /// Name of the currently-active plugin (used as the key into
-    /// `plugin_states`). Returns `None` when no plugin has been
-    /// activated yet.
-    fn active_plugin_name(&self) -> Option<String> {
-        Some(self.borrow().metadata.name.clone()).filter(|n| !n.is_empty())
-    }
-
     // ─── Per-column config (active plugin's bucket) ───────────────────
 
-    /// Snapshot of the active plugin's per-column config map.
-    pub fn all_columns_configs(&self) -> ColumnConfigMap {
-        self.active_plugin_name()
-            .and_then(|n| {
-                self.borrow()
-                    .plugin_states
-                    .get(&n)
-                    .map(|b| b.columns.clone())
-            })
-            .unwrap_or_default()
-    }
-
-    /// Restore-prep snapshot: like [`Self::all_columns_configs`], but
-    /// for each column also materializes any `ControlSpec::Number`
-    /// fields the schema declares with `include: true` that aren't
-    /// already in the bucket entry. The materialized value is the
-    /// schema's `default`, which the schema computes from cached
-    /// column stats (via [`Self::query_column_config_schema`]).
-    ///
-    /// The bucket itself stays minimal (user edits + `include: true`
-    /// values the user *explicitly set*); this helper produces the
-    /// fully-realized payload the plugin's `restore` is expected to
-    /// receive. Every restore-prep site should call this rather than
-    /// `all_columns_configs` directly — otherwise widgets that gate
-    /// `include` fields off other fields (e.g. Datagrid's
-    /// `fg_gradient` revealed when `number_fg_mode = "bar"`) will
-    /// reach the plugin without their default value populated.
-    ///
-    /// `async` because per-column stats (e.g. `abs_max` for Datagrid's
-    /// `fg_gradient`) may need to be fetched before the schema's
-    /// `default` is meaningful. Pass 1 sync-scans the schema for any
-    /// column whose `include: true` Number key is missing from its
-    /// entry AND has no cached stats — `view_config_changed` clears the
-    /// stats cache, so "missing in cache" subsumes "stale". Pass 2
-    /// blocks on a parallel `resolve_abs_max` for that set, then runs
-    /// the materialize loop with the now-warm cache. Columns never
-    /// touched in a stats-dependent mode never trigger a fetch.
-    pub async fn all_columns_configs_materialized(
-        &self,
-        view_config: &ViewConfig,
-        session: &Session,
-    ) -> ColumnConfigMap {
-        let mut configs = self.all_columns_configs();
-
-        // Pass 1: identify columns whose schema demands an `include:
-        // true` Number default we don't have stats for.
-        let mut to_warm: Vec<String> = vec![];
-        for (col, entry) in &configs {
-            if session
-                .get_column_stats(col)
-                .and_then(|s| s.abs_max)
-                .is_some()
-            {
-                continue;
-            }
-            let Ok(schema) =
-                self.query_column_config_schema(view_config, session, col, Some(entry))
-            else {
-                continue;
-            };
-            let needs_warm = schema.fields.iter().any(|f| {
-                matches!(
-                    f,
-                    ControlSpec::Number {
-                        key,
-                        include: Some(true),
-                        ..
-                    } if !entry.contains_key(key)
-                )
-            });
-            if needs_warm {
-                to_warm.push(col.clone());
-            }
-        }
-
-        // Block on the (typically tiny) warm set. Clone the metadata
-        // and resolve the view ref *before* the .await — `metadata()`
-        // returns a live `Ref<>` guard that must not cross an await
-        // boundary.
-        if !to_warm.is_empty() {
-            let metadata = session.metadata().clone();
-            let view = session.get_view();
-            let futs = to_warm
-                .iter()
-                .map(|c| resolve_abs_max(session, &metadata, view.as_ref(), c.as_str()));
-            join_all(futs).await;
-        }
-
-        // Pass 2: materialize. With stats now in cache, the schema
-        // returns a real `default` instead of the placeholder `0`.
-        for (col, entry) in &mut configs {
-            let Ok(schema) =
-                self.query_column_config_schema(view_config, session, col, Some(entry))
-            else {
-                continue;
-            };
-
-            for field in &schema.fields {
-                let ControlSpec::Number {
-                    key,
-                    default,
-                    include: Some(true),
-                    ..
-                } = field
-                else {
-                    continue;
-                };
-
-                if entry.contains_key(key) {
-                    continue;
-                }
-
-                let Some(num) = serde_json::Number::from_f64(*default) else {
-                    continue;
-                };
-
-                entry.insert(key.clone(), serde_json::Value::Number(num));
-            }
-        }
-
-        configs
-    }
-
-    /// Clear the active plugin's per-column config map.
-    pub fn reset_columns_configs(&self) {
-        if let Some(n) = self.active_plugin_name() {
-            self.borrow_mut()
-                .plugin_states
-                .entry(n)
-                .or_default()
-                .columns
-                .clear();
-        }
-    }
-
-    /// Clone of the active plugin's per-column entry for `column_name`,
-    /// or `None` if no value is stored.
-    pub fn get_columns_config(
-        &self,
-        column_name: &str,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let n = self.active_plugin_name()?;
-        self.borrow()
-            .plugin_states
-            .get(&n)?
-            .columns
-            .get(column_name)
-            .cloned()
-    }
-
-    /// Wholesale update the active plugin's per-column config map
-    /// (e.g. from a `restore()` call). Each incoming column entry is
-    /// schema-stripped before insertion — values matching the
-    /// schema-declared default are dropped so the bucket converges to
-    /// the "empty ⇒ reads-default" invariant, mirroring
-    /// [`Self::update_plugin_config`]. `ControlSpec::Number` fields
-    /// declared with `include: true` survive the strip (their default
-    /// is data-dependent, so a literal default value is preserved as
-    /// the user's explicit choice). Column entries that become empty
-    /// after stripping are removed from the bucket entirely.
-    pub fn update_columns_configs(
-        &self,
-        view_config: &ViewConfig,
-        session: &Session,
-        update: ColumnConfigUpdate,
-    ) -> bool {
-        let Some(n) = self.active_plugin_name() else {
-            return false;
-        };
-
-        match update {
-            OptionalUpdate::SetDefault => {
-                let mut st = self.borrow_mut();
-                let bucket = st.plugin_states.entry(n).or_default();
-                let was_nonempty = !bucket.columns.is_empty();
-                bucket.columns.clear();
-                was_nonempty
-            },
-            OptionalUpdate::Missing => false,
-            OptionalUpdate::Update(map) => {
-                // Strip per-column before borrowing the bucket mutably:
-                // the schema query takes an immutable borrow via
-                // `self.metadata()`, which would alias-conflict with
-                // `borrow_mut` below.
-                let stripped: Vec<(String, serde_json::Map<String, serde_json::Value>)> = map
-                    .into_iter()
-                    .map(|(col, mut cfg)| {
-                        if let Ok(schema) =
-                            self.query_column_config_schema(view_config, session, &col, Some(&cfg))
-                        {
-                            let active = schema.active_keys();
-                            cfg.retain(|k, _| active.contains(k));
-                            strip_default_values(&schema, &mut cfg);
-                        }
-
-                        (col, cfg)
-                    })
-                    .collect();
-
-                let mut st = self.borrow_mut();
-                let bucket = st.plugin_states.entry(n).or_default();
-                let mut changed = false;
-                for (col, cfg) in stripped {
-                    if cfg.is_empty() {
-                        if bucket.columns.remove(&col).is_some() {
-                            changed = true;
-                        }
-                    } else {
-                        match bucket.columns.insert(col, cfg.clone()) {
-                            None => changed = true,
-                            Some(old) if old != cfg => changed = true,
-                            _ => {},
-                        }
-                    }
-                }
-
-                changed
-            },
-        }
-    }
-
-    /// Apply a single schema-field update from the column-style UI to
-    /// the active plugin's bucket. Clears the keys the field owns,
-    /// then splices in the partial new sub-state. Drops empty
-    /// entries.
-    ///
-    /// The schema-strip is defense-in-depth: widget callbacks (e.g.
-    /// `NumberFieldPrimitive`) already pre-strip default values, so
-    /// for live edits this strip pass is a no-op. It closes the hole
-    /// for programmatic callers that construct a
-    /// `ColumnConfigFieldUpdate` directly without going through the
-    /// widget (where `include: true` would otherwise be ignored).
-    pub fn update_columns_config_field(
-        &self,
-        view_config: &ViewConfig,
-        session: &Session,
-        column_name: String,
-        mut update: ColumnConfigFieldUpdate,
-    ) {
-        let Some(n) = self.active_plugin_name() else {
-            return;
-        };
-
-        // Take the schema query before the mutable borrow — same
-        // RefCell aliasing reason as in `update_columns_configs`.
-        let current_value = self.get_columns_config(&column_name);
-        if let Ok(schema) = self.query_column_config_schema(
-            view_config,
-            session,
-            &column_name,
-            current_value.as_ref(),
-        ) {
-            strip_default_values(&schema, &mut update.value);
-        }
-
-        let mut st = self.borrow_mut();
-        let bucket = st.plugin_states.entry(n).or_default();
-        let entry = bucket.columns.entry(column_name.clone()).or_default();
-        for k in &update.keys {
-            entry.remove(k);
-        }
-        for (k, v) in update.value {
-            if update.keys.contains(&k) {
-                entry.insert(k, v);
-            }
-        }
-        if entry.is_empty() {
-            bucket.columns.remove(&column_name);
-        }
-    }
-
     // ─── Plugin-level config (active plugin's bucket) ─────────────────
-
-    /// Snapshot of the active plugin's plugin-level config map.
-    pub fn get_plugin_config(&self) -> serde_json::Map<String, serde_json::Value> {
-        self.active_plugin_name()
-            .and_then(|n| {
-                self.borrow()
-                    .plugin_states
-                    .get(&n)
-                    .map(|b| b.plugin.clone())
-            })
-            .unwrap_or_default()
-    }
-
-    /// Clear the active plugin's plugin-level config map.
-    pub fn reset_plugin_config(&self) {
-        if let Some(n) = self.active_plugin_name() {
-            self.borrow_mut()
-                .plugin_states
-                .entry(n)
-                .or_default()
-                .plugin
-                .clear();
-        }
-    }
-
-    /// Synchronously query the active plugin's
-    /// [`ColumnConfigSchema`] used to gate plugin-config strip logic.
-    /// Inlined here (rather than calling `queries::get_plugin_config_schema`)
-    /// to keep `renderer` from back-importing the `queries` module.
-    fn query_plugin_config_schema(
-        &self,
-        view_config: &ViewConfig,
-    ) -> ApiResult<ColumnConfigSchema> {
-        let plugin = self.get_active_plugin()?;
-        let view_config_js = JsValue::from_serde_ext(view_config).unwrap_or(JsValue::NULL);
-        let raw = plugin._plugin_config_schema(&view_config_js)?;
-        serde_wasm_bindgen::from_value(raw).map_err(|e| e.into())
-    }
-
-    /// Per-column counterpart of [`query_plugin_config_schema`]. Used by
-    /// the columns-config write paths (strip-on-write) and the
-    /// restore-prep snapshot (materialize-on-read).
-    ///
-    /// Reads the cached `ColumnStats` (cleared on `view_config_changed`)
-    /// so plugins emit gradient defaults against the column's current
-    /// `abs_max` instead of falling back to `0`.
-    /// [`Self::all_columns_configs_materialized`] warms the cache on
-    /// demand before materializing `include: true` Number fields, so
-    /// the restore path always observes a real default; sync callers
-    /// (column-config strip-on-write) may still see a missing stats
-    /// pass-through and the plugin's `?? 0` fallback, but those writes
-    /// re-strip on the next render cycle.
-    fn query_column_config_schema(
-        &self,
-        view_config: &ViewConfig,
-        session: &Session,
-        column_name: &str,
-        current_value: Option<&serde_json::Map<String, serde_json::Value>>,
-    ) -> ApiResult<ColumnConfigSchema> {
-        let plugin = self.get_active_plugin()?;
-        let plugin_config = self.metadata();
-        let names = &plugin_config.config_column_names;
-        let group = view_config
-            .columns
-            .iter()
-            .position(|maybe_s| maybe_s.as_deref() == Some(column_name))
-            .and_then(|idx| names.get(idx))
-            .map(|s| s.as_str());
-
-        let Some(view_type) = session.metadata().get_column_view_type(column_name) else {
-            return Ok(ColumnConfigSchema { fields: vec![] });
-        };
-
-        let current_js = JsValue::from_serde_ext(&current_value).unwrap_or(JsValue::NULL);
-        let view_config_js = JsValue::from_serde_ext(view_config).unwrap_or(JsValue::NULL);
-
-        // Pull the column's cached stats from the session. The StyleTab
-        // pre-warms this via `fetch_column_abs_max` whenever the user
-        // opens column settings; the cache is invalidated on every
-        // `view_config_changed`, so freshness is bounded.
-        let stats = session.get_column_stats(column_name).unwrap_or_default();
-        let stats_json = serde_json::json!({
-            "abs_max": stats.abs_max,
-        });
-        let stats_js = JsValue::from_serde_ext(&stats_json).unwrap_or(JsValue::NULL);
-
-        let raw = plugin._column_config_schema(
-            &view_type.to_string(),
-            group,
-            column_name,
-            &current_js,
-            &view_config_js,
-            &stats_js,
-        )?;
-
-        serde_wasm_bindgen::from_value(raw).map_err(|e| e.into())
-    }
-
-    /// Wholesale update the active plugin's plugin-level config map.
-    /// Entries whose value equals the schema-declared default are
-    /// treated as "reset this key" — the corresponding bucket entry
-    /// is cleared rather than the default being stored literally.
-    /// Keys absent from the incoming map are left alone (merge
-    /// semantics for the non-default subset).
-    pub fn update_plugin_config(
-        &self,
-        view_config: &ViewConfig,
-        update: PluginConfigUpdate,
-    ) -> bool {
-        let Some(n) = self.active_plugin_name() else {
-            return false;
-        };
-
-        let schema = self.query_plugin_config_schema(view_config).ok();
-        let mut st = self.borrow_mut();
-        let bucket = st.plugin_states.entry(n).or_default();
-        match update {
-            OptionalUpdate::SetDefault => {
-                let changed = !bucket.plugin.is_empty();
-                bucket.plugin.clear();
-                changed
-            },
-            OptionalUpdate::Missing => false,
-            OptionalUpdate::Update(mut map) => {
-                let mut changed = false;
-                if let Some(s) = &schema {
-                    let active = s.active_keys();
-                    map.retain(|k, _| active.contains(k));
-                    // Default-valued entries in a restore payload
-                    // semantically reset the key — strip from the
-                    // map AND clear any existing override in the
-                    // bucket so the wholesale-restore path matches
-                    // the live-edit path (where the widget emits an
-                    // empty value to clear).
-                    map.retain(|key, value| {
-                        let is_default = s
-                            .fields
-                            .iter()
-                            .any(|spec| matches_declared_default(spec, key, value));
-                        if is_default {
-                            if bucket.plugin.remove(key).is_some() {
-                                changed = true;
-                            }
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                }
-
-                for (k, v) in map {
-                    let prev = bucket.plugin.insert(k, v.clone());
-                    if prev.as_ref() != Some(&v) {
-                        changed = true;
-                    }
-                }
-
-                changed
-            },
-        }
-    }
-
-    /// Apply a single schema-field update from the plugin-settings UI
-    /// to the active plugin's bucket. Clear-then-insert semantics
-    /// mirror [`Self::update_columns_config_field`]. Entries in
-    /// `update.value` whose value equals the schema default are
-    /// stripped before applying so default picks reset the key
-    /// rather than store the default literally.
-    pub fn update_plugin_config_field(
-        &self,
-        view_config: &ViewConfig,
-        mut update: ColumnConfigFieldUpdate,
-    ) -> bool {
-        let Some(n) = self.active_plugin_name() else {
-            return false;
-        };
-
-        if let Ok(schema) = self.query_plugin_config_schema(view_config) {
-            strip_default_values(&schema, &mut update.value);
-        }
-
-        let mut st = self.borrow_mut();
-        let bucket = st.plugin_states.entry(n).or_default();
-        let mut changed = false;
-
-        for k in &update.keys {
-            if let Some(v) = update.value.get(k) {
-                let prev = bucket.plugin.insert(k.to_string(), v.clone());
-                if prev.as_ref() != Some(v) {
-                    changed = true;
-                }
-            } else if bucket.plugin.remove(k).is_some() {
-                changed = true;
-            }
-        }
-
-        changed
-    }
 
     /// Whether the active plugin's render warning is currently armed
     /// (i.e. an oversized view will be capped). Becomes `false` once
@@ -700,18 +440,31 @@ impl Renderer {
         self.0.borrow_mut().plugin_store.plugin_configs().clone()
     }
 
-    /// Gets the currently active plugin.  Calling this method before a plugin
-    /// has been selected will cause the default (first) plugin to be
-    /// selected, and doing so when no plugins have been registered is an
-    /// error.
-    pub fn get_active_plugin(&self) -> ApiResult<JsPerspectiveViewerPlugin> {
-        if self.0.borrow().plugins_idx.is_none() {
-            let _ = self.apply_pending_plugin()?;
-        }
+    /// The currently-selected plugin, or `None` if none has been selected yet.
+    ///
+    /// This is a PURE QUERY (command-query separation): unlike
+    /// [`Self::ensure_plugin_selected`] it never selects a default plugin and
+    /// never triggers the lazy `PluginStore` snapshot before a plugin exists.
+    /// Pre-draw / render-path code MUST use this and handle `None` — selecting
+    /// a plugin on the first render, before the real plugins register,
+    /// permanently pins the per-renderer store to the built-in `Debug`
+    /// (init-order race, surfaces on Safari).
+    pub fn active_plugin(&self) -> Option<JsPerspectiveViewerPlugin> {
+        // Bail on `plugins_idx` BEFORE touching `plugin_store`, so an unselected
+        // renderer never snapshots the registry.
+        let idx = self.selected_idx()?;
+        self.0.borrow_mut().plugin_store.plugins().get(idx).cloned()
+    }
 
-        let idx = self.0.borrow().plugins_idx.unwrap_or(0);
-        let result = self.0.borrow_mut().plugin_store.plugins().get(idx).cloned();
-        Ok(result.ok_or("No Plugin")?)
+    /// Ensure a plugin is selected — the registry default when nothing has
+    /// ever been selected — and return it. The COMMAND half of
+    /// [`Self::active_plugin`]: this is the only path that selects a default and
+    /// snapshots the store, so it must run only when actually drawing (by which
+    /// point real plugins have registered). Errors if no plugins are
+    /// registered.
+    pub fn ensure_plugin_selected(&self) -> ApiResult<JsPerspectiveViewerPlugin> {
+        self.commit_plugin(None)?;
+        Ok(self.active_plugin().ok_or("No Plugin")?)
     }
 
     /// Gets a specific `JsPerspectiveViewerPlugin` by name.
@@ -725,25 +478,48 @@ impl Renderer {
         Ok(result.unwrap())
     }
 
+    /// Whether the active plugin has completed a draw. A query, not a
+    /// command — and an explicit flag rather than the old `is_connected()`
+    /// inference, which eager plugin mounting (an element in the DOM before
+    /// its first draw) would falsify.
     pub fn is_plugin_activated(&self) -> ApiResult<bool> {
-        Ok(self
-            .get_active_plugin()?
-            .unchecked_ref::<HtmlElement>()
-            .is_connected())
+        Ok(self.0.has_drawn.get())
     }
 
-    pub async fn restyle_all(&self, view: &perspective_client::View) -> ApiResult<JsValue> {
-        let plugin = self.get_active_plugin()?;
-        let meta = self.metadata();
-        plugin.restyle();
-        let mut limits =
-            get_row_and_col_limits(view, &meta, self.is_render_warning_enabled()).await?;
-        limits.is_update = false;
-        plugin
-            .draw(view.clone().into(), limits.max_cols, limits.max_rows, false)
-            .await?;
+    /// Take the box the plugin last painted at through a presize (see
+    /// `RendererData::presized_box`).
+    pub fn take_presized_box(&self) -> Option<(f64, f64)> {
+        self.0.presized_box.take()
+    }
 
-        Ok(JsValue::UNDEFINED)
+    /// Mount the selected plugin element into the viewer's light DOM without
+    /// drawing it (see [`activate::mount_plugin`] — idempotent). Pure query:
+    /// a renderer with no selection is a no-op, deferring to the draw path's
+    /// `ensure_plugin_selected`. Used to mount eagerly — at panel creation
+    /// and at locked-draw start — so a slow first view query never leaves an
+    /// empty panel frame. NOTE eager mounting is exactly why
+    /// [`Self::is_plugin_activated`] must be an explicit has-drawn flag, not
+    /// DOM-connectedness.
+    pub fn mount_active_plugin(&self) -> ApiResult<()> {
+        if let Some(plugin) = self.active_plugin() {
+            let viewer_elem = self.0.borrow().viewer_elem.clone();
+            mount_plugin(&viewer_elem, &plugin, self.slot_name().as_deref())?;
+        }
+
+        Ok(())
+    }
+
+    /// Record whether this panel is the active panel (data only — see the
+    /// field doc; the CSS class lands at the next locked plugin dispatch).
+    pub fn set_active_flag(&self, is_active: bool) {
+        self.0.is_active_panel.set(is_active);
+    }
+
+    /// Record whether this panel is the workspace's only panel (data only —
+    /// see the field doc; the CSS class lands at the next locked plugin
+    /// dispatch).
+    pub fn set_solo_flag(&self, is_solo: bool) {
+        self.0.is_solo_panel.set(is_solo);
     }
 
     pub fn set_throttle(&self, val: Option<f64>) {
@@ -767,10 +543,22 @@ impl Renderer {
         self.0.render_warning.set(false);
     }
 
-    pub fn get_next_plugin_metadata(
+    /// Resolve a [`PluginUpdate`] against the current selection. Returns the
+    /// target plugin's index + static config when the update names a plugin
+    /// (or the registry default, for `SetDefault`) that differs from the
+    /// current selection; `None` when the update is `Missing`, names an
+    /// unknown plugin, or resolves to the already-active one.
+    ///
+    /// PURE query — nothing is staged on the `Renderer`. Thread the returned
+    /// index *into* a locked draw task and commit it there with
+    /// [`Self::commit_plugin`]: plugin-swap intent must never exist outside a
+    /// running draw transaction, or an unrelated draw that wins the lock first
+    /// (e.g. a `table_updated` redraw during a `restore()`) could observe or
+    /// commit a half-applied swap.
+    pub fn resolve_plugin_update(
         &self,
         update: &PluginUpdate,
-    ) -> Option<Rc<PluginStaticConfig>> {
+    ) -> Option<(usize, Rc<PluginStaticConfig>)> {
         let default_plugin_name = PLUGIN_REGISTRY.default_plugin_name();
         let name = match update {
             PluginUpdate::Missing => return None,
@@ -780,55 +568,69 @@ impl Renderer {
 
         let idx = self.find_plugin_idx(name)?;
         let changed = !matches!(
-            self.0.borrow().plugins_idx,
+            self.selected_idx(),
             Some(selected_idx) if selected_idx == idx
         );
 
         if changed {
-            self.borrow_mut().pending_plugin = Some(idx);
-            self.0
+            let config = self
+                .0
                 .borrow_mut()
                 .plugin_store
                 .plugin_configs()
                 .get(idx)
-                .cloned()
+                .cloned()?;
+            Some((idx, config))
         } else {
             None
         }
     }
 
-    pub fn apply_pending_plugin(&self) -> ApiResult<bool> {
-        let xxx = self.borrow_mut().pending_plugin.take();
-        if let Some(idx) = xxx {
-            let changed = !matches!(
-                self.0.borrow().plugins_idx,
-                Some(selected_idx) if selected_idx == idx
-            );
+    /// Reject a [`PluginUpdate`] naming a plugin that is not registered.
+    pub fn check_plugin_update(&self, update: &PluginUpdate) -> ApiResult<()> {
+        if let PluginUpdate::Update(name) = update
+            && self.find_plugin_idx(name).is_none()
+        {
+            let known = self
+                .get_all_plugin_configs()
+                .iter()
+                .map(|c| format!("\"{}\"", c.name))
+                .collect::<Vec<_>>()
+                .join(", ");
 
-            if changed {
-                self.commit_plugin_idx(idx)?;
-            }
-
-            Ok(changed)
-        } else {
-            if self.0.borrow().plugins_idx.is_none() {
-                self.set_plugin(Some(&PLUGIN_REGISTRY.default_plugin_name()))?;
-            }
-
-            Ok(false)
+            return Err(format!("Unknown plugin \"{name}\"; expected one of {known}").into());
         }
+
+        Ok(())
     }
 
-    fn set_plugin(&self, name: Option<&str>) -> ApiResult<bool> {
-        self.borrow_mut().pending_plugin = None;
-        let default_plugin_name = PLUGIN_REGISTRY.default_plugin_name();
-        let name = name.unwrap_or(default_plugin_name.as_str());
-        let idx = self
-            .find_plugin_idx(name)
-            .ok_or_else(|| JsValue::from(format!("Unknown plugin '{name}'")))?;
+    /// Commit a plugin selection previously resolved by
+    /// [`Self::resolve_plugin_update`]. COMMAND — call only from inside a
+    /// locked draw task, so the swap lands atomically with the view rebuild
+    /// and draw it belongs to. `None` ensures *some* plugin is selected (the
+    /// registry default) without changing an existing selection. Returns
+    /// whether the active plugin changed (`None`'s default-selection case
+    /// reports `false`, preserving first-selection semantics for the
+    /// swap-restore pass in the draw tasks).
+    pub fn commit_plugin(&self, idx: Option<usize>) -> ApiResult<bool> {
+        let idx = match idx {
+            Some(idx) => idx,
+            None => {
+                if self.selected_idx().is_none() {
+                    let name = PLUGIN_REGISTRY.default_plugin_name();
+                    let idx = self
+                        .find_plugin_idx(&name)
+                        .ok_or_else(|| JsValue::from(format!("Unknown plugin '{name}'")))?;
+
+                    self.commit_plugin_idx(idx)?;
+                }
+
+                return Ok(false);
+            },
+        };
 
         let changed = !matches!(
-            self.0.borrow().plugins_idx,
+            self.selected_idx(),
             Some(selected_idx) if selected_idx == idx
         );
 
@@ -839,12 +641,11 @@ impl Renderer {
         Ok(changed)
     }
 
-    /// Shared tail of `apply_pending_plugin` / `set_plugin`: switch the
+    /// Shared tail of [`Self::commit_plugin`]: switch the
     /// active plugin to `idx`, swap in its cached `PluginStaticConfig`,
     /// reset the per-plugin render-warning flag, and fire
     /// `plugin_changed`.
     fn commit_plugin_idx(&self, idx: usize) -> ApiResult<()> {
-        self.borrow_mut().plugins_idx = Some(idx);
         let config = self
             .0
             .borrow_mut()
@@ -854,19 +655,46 @@ impl Renderer {
             .cloned()
             .ok_or("No Plugin")?;
 
-        self.borrow_mut().metadata = config.clone();
+        self.cell.swap(self.cell.state().with_plugin(PluginRef {
+            idx,
+            static_config: config,
+        }));
+
+        self.activate_committed_plugin()
+    }
+
+    /// The `static_config` of the plugin at store index `idx`, for a
+    /// [`PluginRef`] committed by a transaction rather than by
+    /// [`Self::commit_plugin`].
+    pub fn plugin_ref(&self, idx: usize) -> ApiResult<PluginRef> {
+        let static_config = self
+            .0
+            .borrow_mut()
+            .plugin_store
+            .plugin_configs()
+            .get(idx)
+            .cloned()
+            .ok_or("No Plugin")?;
+
+        Ok(PluginRef { idx, static_config })
+    }
+
+    /// Bring the plugin ELEMENT in line with a just-committed selection: the
+    /// newly-selected element has drawn nothing and captured no CSS, takes its
+    /// own stored bucket, and is announced.
+    pub fn activate_committed_plugin(&self) -> ApiResult<()> {
+        // The newly-selected plugin element has not drawn (a swap keeps the
+        // OLD plugin mounted until the new one's draw lands) — and has
+        // captured no CSS.
+        self.0.has_drawn.set(false);
+        self.0.captured_theme.borrow_mut().take();
         self.0.render_warning.set(true);
-        let plugin: JsPerspectiveViewerPlugin = self.get_active_plugin()?;
+        let plugin: JsPerspectiveViewerPlugin = self.active_plugin().ok_or("No Plugin")?;
 
         // Push the newly-activated plugin's stored bucket through
         // `plugin.restore` so the swap immediately reflects any
         // viewer-owned per-column and plugin-level config.
-        let bucket = self
-            .borrow()
-            .plugin_states
-            .get(&config.name)
-            .cloned()
-            .unwrap_or_default();
+        let bucket = self.cell.state().bucket(&self.metadata().name);
         let token = JsValue::from_serde_ext(&bucket.plugin).unwrap_or(JsValue::NULL);
         if let Err(e) = plugin.restore(&token, Some(&bucket.columns)) {
             tracing::warn!("plugin.restore on swap failed: {:?}", e);
@@ -876,190 +704,18 @@ impl Renderer {
         Ok(())
     }
 
-    pub async fn with_lock<T>(self, task: impl Future<Output = ApiResult<T>>) -> ApiResult<T> {
-        let draw_mutex = self.draw_lock();
-        draw_mutex.lock(task).await
+    /// The committed plugin selection's index into the plugin store.
+    pub fn committed_plugin_idx(&self) -> Option<usize> {
+        self.selected_idx()
     }
 
-    pub async fn resize(&self) -> ApiResult<()> {
-        let draw_mutex = self.draw_lock();
-        let timer = self.render_timer();
-        draw_mutex
-            .debounce(async {
-                set_timeout(timer.get_throttle()).await?;
-                let jsplugin = self.get_active_plugin()?;
-                jsplugin.resize().await?;
-                Ok(())
-            })
-            .await
+    /// The COMMITTED panel theme, pending theme edits excluded.
+    pub fn committed_theme(&self) -> Option<String> {
+        self.cell.state().chrome.theme.clone()
     }
 
-    pub async fn resize_with_dimensions(&self, width: f64, height: f64) -> ApiResult<()> {
-        let draw_mutex = self.draw_lock();
-        let timer = self.render_timer();
-        draw_mutex
-            .debounce(async {
-                set_timeout(timer.get_throttle()).await?;
-                let plugin = self.get_active_plugin()?;
-                let main_panel: &web_sys::HtmlElement = plugin.unchecked_ref();
-                let rect = main_panel.get_bounding_client_rect();
-                if (height - rect.height()).abs() > 0.5 || (width - rect.width()).abs() > 0.5 {
-                    let new_width = format!("{}px", width);
-                    let new_height = format!("{}px", height);
-                    main_panel.style().set_property("width", &new_width)?;
-                    main_panel.style().set_property("height", &new_height)?;
-                    let result = plugin.resize().await;
-                    main_panel.style().set_property("width", "")?;
-                    main_panel.style().set_property("height", "")?;
-                    result?;
-                }
-
-                Ok(())
-            })
-            .await
-    }
-
-    /// This will take a future which _should_ create a new view and then will
-    /// draw it. As the `session` closure is asynchronous, it can be cancelled
-    /// by returning `None`.
-    pub async fn draw(
-        &self,
-        session: impl Future<Output = ApiResult<Option<View>>>,
-    ) -> ApiResult<()> {
-        self.draw_plugin(session, false).await
-    }
-
-    /// This will update an already existing view
-    pub async fn update(&self, session: Option<View>) -> ApiResult<()> {
-        self.draw_plugin(async { Ok(session) }, true).await
-    }
-
-    async fn draw_plugin(
-        &self,
-        session: impl Future<Output = ApiResult<Option<View>>>,
-        is_update: bool,
-    ) -> ApiResult<()> {
-        let timer = self.render_timer();
-        let task = async move {
-            if is_update {
-                set_timeout(timer.get_throttle()).await?;
-            }
-
-            if let Some(view) = session.await? {
-                timer.capture_time(self.draw_view(&view, is_update)).await
-            } else {
-                tracing::debug!("Render skipped, no `View` attached");
-                Ok(())
-            }
-        };
-
-        let draw_mutex = self.draw_lock();
-        if is_update {
-            draw_mutex.debounce(task).await
-        } else {
-            draw_mutex.lock(task).await
-        }
-    }
-
-    async fn draw_view(&self, view: &perspective_client::View, is_update: bool) -> ApiResult<()> {
-        let plugin = self.get_active_plugin()?;
-        let meta = self.metadata();
-        let mut limits =
-            get_row_and_col_limits(view, &meta, self.is_render_warning_enabled()).await?;
-        limits.is_update = is_update;
-        if let Some(cb) = self.0.on_render_limits_changed.borrow().as_ref() {
-            cb.emit(limits);
-        }
-
-        let viewer_elem = &self.0.borrow().viewer_elem.clone();
-        let result = if is_update {
-            let task = plugin.update(view.clone().into(), limits.max_cols, limits.max_rows, false);
-            activate_plugin(viewer_elem, &plugin, task).await
-        } else {
-            let task = plugin.draw(view.clone().into(), limits.max_cols, limits.max_rows, false);
-            activate_plugin(viewer_elem, &plugin, task).await
-        };
-
-        if let Err(error) = result.ignore_view_delete() {
-            tracing::warn!("{}", error);
-        }
-
-        remove_inactive_plugin(
-            viewer_elem,
-            &plugin,
-            self.plugin_data.borrow_mut().plugin_store.plugins(),
-        )
-    }
-
-    /// Decide whether to draw plugin or self first based on whether the panel
-    /// is opening or closing, then draw with a timeout.  If the timeout
-    /// triggers, draw self and resolve `on_toggle` but still await the
-    /// completion of the draw task.
-    pub async fn presize(
-        &self,
-        open: bool,
-        panel_task: impl Future<Output = ApiResult<()>>,
-    ) -> ApiResult<JsValue> {
-        let render_task = self.resize_with_timeout(open);
-        let result = if open {
-            panel_task.await?;
-            render_task.await
-        } else {
-            let result = render_task.await;
-            panel_task.await?;
-            result
-        };
-
-        match result {
-            Ok(x) => x,
-            Err(cont) => {
-                tracing::warn!("Presize took longer than {}ms", PRESIZE_TIMEOUT);
-                cont.await.unwrap()
-            },
-        }
-    }
-
-    /// Lock on `resize()` task, in parallel with a timeout.  In the return
-    /// type, `Result::Err` contains the continuation task, which must be
-    /// awaited lest the plugin draw itself never trigger.
-    async fn resize_with_timeout(&self, open: bool) -> Result<TaskResult, TimeoutTask<'_>> {
-        let task = async move {
-            if open {
-                self.get_active_plugin()?.resize().await
-            } else {
-                self.resize_with_explicit_dimensions().await
-            }
-        };
-
-        let draw_lock = self.draw_lock();
-        let tasks: [TimeoutTask<'_>; 2] = [
-            Box::pin(async move { Some(draw_lock.lock(task).await) }),
-            Box::pin(async {
-                set_timeout(PRESIZE_TIMEOUT).await.unwrap();
-                None
-            }),
-        ];
-
-        let (x, _, y) = select_all(tasks.into_iter()).await;
-        x.ok_or_else(|| y.into_iter().next().unwrap())
-    }
-
-    /// Resize the `<div>` offscreen, then resize the plugin
-    async fn resize_with_explicit_dimensions(&self) -> TaskResult {
-        let plugin = self.get_active_plugin()?;
-        let main_panel: &web_sys::HtmlElement = plugin.unchecked_ref();
-        let new_width = format!("{}px", &self.0.borrow().viewer_elem.client_width());
-        let new_height = format!("{}px", &self.0.borrow().viewer_elem.client_height());
-        main_panel.style().set_property("width", &new_width)?;
-        main_panel.style().set_property("height", &new_height)?;
-        let result = plugin.resize().await;
-        main_panel.style().set_property("width", "")?;
-        main_panel.style().set_property("height", "")?;
-        result
-    }
-
-    fn draw_lock(&self) -> DebounceMutex {
-        self.draw_lock.clone()
+    fn selected_idx(&self) -> Option<usize> {
+        self.cell.state().plugin.as_ref().map(|plugin| plugin.idx)
     }
 
     pub fn render_timer(&self) -> MovingWindowRenderTimer {
@@ -1070,10 +726,6 @@ impl Renderer {
         let short_name = make_short_name(name);
         let mut borrowed = self.0.borrow_mut();
         let configs = borrowed.plugin_store.plugin_configs();
-        // Prefer an exact (normalised) match so e.g. `"Y Line"` doesn't
-        // substring-resolve to `"X/Y Line"` just because it was registered
-        // first. Falls back to `contains` so short/abbreviated names
-        // (`restore({ plugin: "scat" })` → `"scatter"`) still work.
         let short_names: Vec<String> = configs.iter().map(|c| make_short_name(&c.name)).collect();
         if let Some(i) = short_names.iter().position(|n| n == &short_name) {
             return Some(i);
@@ -1097,14 +749,8 @@ impl Renderer {
     /// suitable for passing as a Yew prop.  Called by the root component
     /// whenever a renderer-related PubSub event fires.
     pub fn to_props(&self, render_limits: Option<RenderLimits>) -> RendererProps {
-        // Guard: don't touch the PluginStore if no plugin has been explicitly
-        // selected yet.  Calling `get_active_plugin()` or `get_all_plugins()`
-        // triggers `PluginStore::init_lazy()`, which snapshots the
-        // PLUGIN_REGISTRY.  If this happens during component `create()` —
-        // before JavaScript has called `registerPlugin()` — the cache will
-        // only contain the default Debug plugin and custom plugins registered
-        // later will never be found.
-        let has_plugin = self.0.borrow().plugins_idx.is_some();
+        let render_limits = render_limits.filter(RenderLimits::is_capped);
+        let has_plugin = self.active_plugin().is_some();
         if has_plugin {
             let config = self.metadata();
             let plugin_name = Some(config.name.clone());
@@ -1115,8 +761,9 @@ impl Renderer {
                 .map(|c| c.name.clone())
                 .collect::<Vec<_>>()
                 .into();
-            let plugin_config = PtrEqRc::new(self.get_plugin_config());
 
+            let plugin_config = PtrEqRc::new(self.get_plugin_config());
+            let columns_config = PtrEqRc::new(self.all_columns_configs());
             RendererProps {
                 plugin_name,
                 config,
@@ -1124,6 +771,7 @@ impl Renderer {
                 available_plugins,
                 is_chart,
                 plugin_config,
+                columns_config,
             }
         } else {
             RendererProps {
@@ -1133,69 +781,8 @@ impl Renderer {
                 available_plugins: PtrEqRc::new(vec![]),
                 is_chart: false,
                 plugin_config: PtrEqRc::default(),
+                columns_config: PtrEqRc::default(),
             }
         }
-    }
-}
-
-/// Drop entries from `map` whose value matches the schema-declared
-/// default for that key. Used by both the plugin-config and
-/// columns-config write paths to converge buckets to the
-/// "empty ⇒ reads-default" invariant. For `ControlSpec::Number`
-/// entries marked `include: Some(true)`,
-/// [`matches_declared_default`] short-circuits so the value survives
-/// (used when the declared default is data-dependent and unreliable —
-/// e.g. Datagrid's `fg_gradient`, whose default is the column's
-/// `abs_max`).
-fn strip_default_values(
-    schema: &ColumnConfigSchema,
-    map: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    map.retain(|key, value| {
-        !schema
-            .fields
-            .iter()
-            .any(|spec| matches_declared_default(spec, key, value))
-    });
-}
-
-/// Does `value` for `key` match the `default` declared by `spec`?
-/// Composite variants (`NumberSeriesStyle`, `DatetimeFormat`, etc.) own
-/// nested defaults that don't have a single comparable scalar — the
-/// widget is responsible for emitting empty values when the user
-/// resets composite controls, so this helper returns `false` for them.
-fn matches_declared_default(spec: &ControlSpec, key: &str, value: &Value) -> bool {
-    match spec {
-        ControlSpec::Enum {
-            key: k, default, ..
-        } if k == key => value.as_str() == Some(default.as_str()),
-        ControlSpec::Bool {
-            key: k, default, ..
-        } if k == key => value.as_bool() == Some(*default),
-        ControlSpec::Number {
-            key: k,
-            include: Some(true),
-            ..
-        } if k == key => false,
-        ControlSpec::Number {
-            key: k, default, ..
-        } if k == key => value.as_f64() == Some(*default),
-        ControlSpec::String {
-            key: k, default, ..
-        } if k == key => value.as_str() == Some(default.as_str()),
-        ControlSpec::Color {
-            key: k, default, ..
-        } if k == key => value.as_str() == Some(default.as_str()),
-        ControlSpec::ColorRange {
-            key_pos,
-            default_pos,
-            ..
-        } if key_pos == key => value.as_str() == Some(default_pos.as_str()),
-        ControlSpec::ColorRange {
-            key_neg,
-            default_neg,
-            ..
-        } if key_neg == key => value.as_str() == Some(default_neg.as_str()),
-        _ => false,
     }
 }

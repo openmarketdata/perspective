@@ -11,20 +11,24 @@
 #  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import base64
+import json
 import logging
 import os
+import pathlib
 import re
 import importlib.metadata
 import inspect
 
 from string import Template
-from ipywidgets import DOMWidget
-from traitlets import Unicode, observe
+import anywidget
+from traitlets import observe
 from .viewer import PerspectiveViewer
 
 __version__ = re.sub(".dev[0-9]+", "", importlib.metadata.version("perspective-python"))
 
 __all__ = ["PerspectiveWidget"]
+
+_STATIC = pathlib.Path(__file__).parent / "static"
 
 __doc__ = """
 `PerspectiveWidget` is a JupyterLab widget that implements the same API as
@@ -90,7 +94,7 @@ PerspectiveWidget(table)
 """
 
 
-class PerspectiveWidget(DOMWidget, PerspectiveViewer):
+class PerspectiveWidget(anywidget.AnyWidget, PerspectiveViewer):
     """`PerspectiveWidget` allows for Perspective to be used as a Jupyter
     widget.
 
@@ -123,13 +127,8 @@ class PerspectiveWidget(DOMWidget, PerspectiveViewer):
     >>> widget.table.update({"a": [4, 5]}) # Browser UI updates
     """
 
-    # Required by ipywidgets for proper registration of the backend
-    _model_name = Unicode("PerspectiveModel").tag(sync=True)
-    _model_module = Unicode("@perspective-dev/jupyterlab").tag(sync=True)
-    _model_module_version = Unicode("~{}".format(__version__)).tag(sync=True)
-    _view_name = Unicode("PerspectiveView").tag(sync=True)
-    _view_module = Unicode("@perspective-dev/jupyterlab").tag(sync=True)
-    _view_module_version = Unicode("~{}".format(__version__)).tag(sync=True)
+    _esm = _STATIC / "perspective-anywidget.js"
+    _css = _STATIC / "perspective-anywidget.css"
 
     def __init__(
         self,
@@ -297,7 +296,7 @@ class PerspectiveWidget(DOMWidget, PerspectiveViewer):
                 session.close()
 
     def _repr_mimebundle_(self, **kwargs):
-        super_bundle = super(DOMWidget, self)._repr_mimebundle_(**kwargs)
+        super_bundle = super()._repr_mimebundle_(**kwargs)
         if not _jupyter_html_export_enabled():
             return super_bundle
 
@@ -311,30 +310,33 @@ class PerspectiveWidget(DOMWidget, PerspectiveViewer):
         with open(template_path, "r") as template_data:
             template = Template(template_data.read())
 
-        def psp_cdn(module, path=None):
-            if path is None:
-                path = f"cdn/{module}.js"
-
+        def psp_cdn(module, path):
             # perspective developer affordance: works with your local `pnpm run start blocks`
             # return f"http://localhost:8080/node_modules/@perspective-dev/{module}/dist/{path}"
             return f"https://cdn.jsdelivr.net/npm/@perspective-dev/{module}@{__version__}/dist/{path}"
 
-        return super(DOMWidget, self)._repr_mimebundle_(**kwargs) | {
-            "text/html": template.substitute(
-                psp_cdn_perspective=psp_cdn("perspective"),
-                psp_cdn_perspective_viewer=psp_cdn("perspective-viewer"),
-                psp_cdn_perspective_viewer_datagrid=psp_cdn(
-                    "perspective-viewer-datagrid"
-                ),
-                psp_cdn_perspective_viewer_charts=psp_cdn("perspective-viewer-charts"),
-                psp_cdn_perspective_viewer_themes=psp_cdn(
-                    "perspective-viewer-themes", "css/themes.css"
-                ),
-                viewer_id=self.model_id,
-                viewer_attrs=viewer_attrs,
-                b64_data=b64_data.decode("utf-8"),
-            )
-        }
+        html = template.substitute(
+            psp_cdn_perspective=psp_cdn("client", "cdn/perspective.js"),
+            psp_cdn_perspective_viewer=psp_cdn("viewer", "cdn/perspective-viewer.js"),
+            psp_cdn_perspective_viewer_datagrid=psp_cdn(
+                "viewer-datagrid", "cdn/perspective-viewer-datagrid.js"
+            ),
+            psp_cdn_perspective_viewer_charts=psp_cdn(
+                "viewer-charts", "cdn/perspective-viewer-charts.js"
+            ),
+            psp_cdn_perspective_viewer_themes=psp_cdn("viewer", "css/themes.css"),
+            viewer_id=self.model_id,
+            viewer_attrs=json.dumps(viewer_attrs),
+            b64_data=b64_data.decode("utf-8"),
+        )
+
+        # anywidget's `_repr_mimebundle_` returns `tuple[dict, dict] | None`
+        # (data, metadata) rather than the plain dict `ipywidgets` returns.
+        if isinstance(super_bundle, tuple):
+            data, metadata = super_bundle
+            return dict(data) | {"text/html": html}, metadata
+
+        return (super_bundle or {}) | {"text/html": html}
 
 
 def _jupyter_html_export_enabled():

@@ -13,6 +13,7 @@
 import type { FacetConfig, PluginConfig } from "../charts/chart";
 import type { PerspectiveClickDetail } from "../event-detail";
 import type { ThemeSnapshot } from "../theme/theme";
+import type { TileSourceSpec } from "../map/tile-source";
 import type { ViewConfig } from "@perspective-dev/client";
 
 export type { ThemeSnapshot };
@@ -31,6 +32,7 @@ export type ControlMsg =
     | SetBufferMaxCapacityMsg
     | LoadAndRenderMsg
     | RedrawMsg
+    | DeselectMsg
     | ResizeMsg
     | ClearMsg
     | InvalidateThemeMsg
@@ -52,7 +54,9 @@ export type WorkerMsg =
     | SetCursorMsg
     | UserClickMsg
     | UserSelectMsg
+    | PluginConfigDeltaMsg
     | LoadAndRenderAckMsg
+    | ResizeAckMsg
     | FrameBitmapMsg
     | ErrorMsg;
 
@@ -98,8 +102,20 @@ export interface InitMsg {
      * `dpr` and there is no host-side GL drawing buffer.
      */
     glCanvas?: OffscreenCanvas;
-    gridlinesCanvas: OffscreenCanvas;
-    chromeCanvas: OffscreenCanvas;
+
+    /**
+     * The gridlines (bottom) and chrome/axes (top) 2D layers.
+     * Transferred via `transferControlToOffscreen` on the host, present
+     * iff `renderMode === "direct"` — their pixels reach the screen
+     * through the compositor. In blit mode the renderer allocates
+     * worker-local surfaces instead and composites both layers into the
+     * shipped `FrameBitmapMsg`, so every layer of the frame rides the
+     * host's staged-present hold (a transferred canvas presents on the
+     * compositor's own schedule, unsynchronized with the host's layout
+     * commits — the one-frame axes warp on anticipated resizes).
+     */
+    gridlinesCanvas?: OffscreenCanvas;
+    chromeCanvas?: OffscreenCanvas;
 
     /**
      * `MessagePort` to the host's `ProxySession`. Worker mode only —
@@ -160,7 +176,27 @@ export interface InitMsg {
      * a `setPluginConfig` control msg.
      */
     pluginConfig: PluginConfig;
+
+    /**
+     * Initial per-column config (`alt_axis`, `chart_type`, formats, …).
+     * Seeds the chart impl before the first `loadAndRender` — the host
+     * calls `plugin.restore` before the renderer exists, so without
+     * this the initial `columns_config` never reaches the worker.
+     * Later changes arrive as `setColumnsConfig` control msgs.
+     */
+    columnsConfig?: Record<string, any>;
     defaultChartType?: string;
+
+    /**
+     * Resolved spec for `pluginConfig.map_tile_provider`, when the
+     * plugin realm's registry knows the id — see
+     * {@link SetPluginConfigMsg.tileSource} for the invariant. Applied
+     * to the worker realm's registry before the chart impl is
+     * constructed. Bundled [map/tile-sources.json] entries ship inside
+     * the worker bundle, so this matters only for runtime-registered
+     * providers.
+     */
+    tileSource?: TileSourceSpec;
 
     /**
      * Pre-resolved CSS-variable theme snapshot from the host.
@@ -248,6 +284,18 @@ export interface SetColumnsConfigMsg {
 export interface SetPluginConfigMsg {
     kind: "setPluginConfig";
     cfg: PluginConfig;
+
+    /**
+     * Resolved spec for `cfg.map_tile_provider`, when the plugin
+     * realm's registry knows the id. Riding the config keeps the two
+     * realms' registries convergent with NO eager mirroring: the
+     * worker registers this spec before applying `cfg`, so it can
+     * never hold a config whose provider it cannot resolve —
+     * regardless of when `registerTileSource` ran relative to
+     * renderer construction. Absent for unknown ids (the worker falls
+     * back to the default basemap).
+     */
+    tileSource?: TileSourceSpec;
 }
 
 export interface SetBufferMaxCapacityMsg {
@@ -294,17 +342,49 @@ export interface LoadAndRenderMsg {
 export interface LoadAndRenderAckMsg {
     kind: "loadAndRenderAck";
     msgId: number;
+    error?: string;
 }
 
 export interface RedrawMsg {
     kind: "redraw";
 }
 
+/**
+ * Host → worker: silently clear the chart's selection state (pinned
+ * tooltip) — no `userSelect` reply, so the host filter-bar removal that
+ * triggered it can't echo back into the host's filter set. The worker's
+ * `TooltipController.dismiss()` posts `dismissTooltip` to tear down the
+ * host-side pinned artifact.
+ */
+export interface DeselectMsg {
+    kind: "deselect";
+}
+
+/**
+ * Host → worker: resize the chart to a new CSS box. Replied with
+ * {@link ResizeAckMsg} AFTER the resized frame PRESENTS — the host's
+ * `plugin.resize()` promise is the viewer's presize contract ("the
+ * plugin has repainted at the target box when this resolves"), so an
+ * ack at message-receipt would let the settings-pane layout commit
+ * against the old-dimensions bitmap (the aspect-ratio warp).
+ */
 export interface ResizeMsg {
     kind: "resize";
+    msgId: number;
     cssWidth: number;
     cssHeight: number;
     dpr: number;
+}
+
+/**
+ * Worker → host reply to a `ResizeMsg`, posted after the resized
+ * frame's present completes. Always sent — present failures and
+ * torn-down charts included — so the host's awaited promise resolves
+ * deterministically.
+ */
+export interface ResizeAckMsg {
+    kind: "resizeAck";
+    msgId: number;
 }
 
 export interface ClearMsg {
@@ -363,7 +443,8 @@ export interface SnapshotPngReqMsg {
 export interface SnapshotPngReplyMsg {
     kind: "snapshotPngReply";
     requestId: number;
-    blob: Blob;
+    blob?: Blob;
+    error?: string;
 }
 
 export interface DestroyMsg {
@@ -427,7 +508,9 @@ export interface ErrorMsg {
  */
 export interface PinTooltipMsg {
     kind: "pinTooltip";
-    lines: string[];
+
+    grid: string[][];
+    style: { opacity: number; maxColumnPx: number };
     pos: { px: number; py: number };
     bounds: { cssWidth: number; cssHeight: number };
 }
@@ -445,6 +528,21 @@ export interface DismissTooltipMsg {
 export interface SetCursorMsg {
     kind: "setCursor";
     cursor: string;
+}
+
+/**
+ * Renderer → host: a completed legend gesture (sidebar width drag,
+ * floating move / resize) produced new values for the legend's
+ * `plugin_config` fields. Posted ONCE per gesture, at pointerup — never
+ * per pointermove — with only the fields the gesture changed. The host
+ * plugin persists them through the viewer's public `restore` surface
+ * (a user-gesture echo), which merges the host bucket, refreshes the
+ * settings form, and echoes one `setPluginConfig` back with the same
+ * values (a no-op by the worker's legend-field equality guard).
+ */
+export interface PluginConfigDeltaMsg {
+    kind: "pluginConfigDelta";
+    fields: Record<string, string | number | boolean>;
 }
 
 /**

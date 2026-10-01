@@ -12,16 +12,16 @@
 
 use itertools::Itertools;
 use perspective_client::config::*;
-use perspective_js::utils::ApiFuture;
 use web_sys::*;
 use yew::prelude::*;
 
 use super::expr_edit_button::*;
 use crate::components::type_icon::TypeIcon;
 use crate::config::ColumnSelectMode;
-use crate::presentation::{ColumnLocator, Presentation};
+use crate::presentation::{ColumnSettingsTarget, Presentation};
 use crate::renderer::*;
 use crate::session::*;
+use crate::tasks::apply_and_render;
 use crate::utils::*;
 
 #[derive(Clone, Properties)]
@@ -43,6 +43,10 @@ pub struct InactiveColumnProps {
     #[prop_or_default]
     pub is_expression: bool,
 
+    /// Whether this column is a window column.
+    #[prop_or_default]
+    pub is_window: bool,
+
     /// Session metadata snapshot — threaded from `SessionProps`.
     pub metadata: SessionMetadataRc,
 
@@ -57,7 +61,7 @@ pub struct InactiveColumnProps {
     pub onselect: Callback<()>,
 
     /// Fires when this column's expression/config button is clicked.
-    pub on_open_expr_panel: Callback<ColumnLocator>,
+    pub on_open_expr_panel: Callback<ColumnSettingsTarget>,
 
     // State
     pub presentation: Presentation,
@@ -72,6 +76,7 @@ impl PartialEq for InactiveColumnProps {
             && self.name == rhs.name
             && self.is_editing == rhs.is_editing
             && self.is_expression == rhs.is_expression
+            && self.is_window == rhs.is_window
             && self.metadata == rhs.metadata
             && self.view_config == rhs.view_config
     }
@@ -136,8 +141,10 @@ impl Component for InactiveColumn {
             let event_name = ctx.props().name.to_owned();
             let presentation = ctx.props().presentation.clone();
             move |event: DragEvent| {
-                presentation.set_drag_image(&event).unwrap();
-                presentation.notify_drag_start(event_name.to_string(), DragEffect::Copy);
+                if presentation.set_drag_image(&event) {
+                    presentation.notify_drag_start(event_name.to_string(), DragEffect::Copy);
+                }
+
                 MouseLeave(true)
             }
         });
@@ -148,6 +155,7 @@ impl Component for InactiveColumn {
             .callback(|event: MouseEvent| MouseEnter(event.which() == 0));
 
         let is_expression = ctx.props().is_expression;
+        let is_window = ctx.props().is_window;
 
         let mut is_active_class = ctx.props().renderer.metadata().select_mode.css();
         is_active_class.push("shift-alt-icon");
@@ -179,7 +187,8 @@ impl Component for InactiveColumn {
                             name={ctx.props().name.clone()}
                             on_open_expr_panel={&ctx.props().on_open_expr_panel}
                             {is_expression}
-                            is_disabled={!is_expression}
+                            {is_window}
+                            is_disabled={!(is_expression || is_window)}
                             is_editing={ctx.props().is_editing}
                         />
                     </div>
@@ -231,13 +240,8 @@ impl InactiveColumnProps {
             ..ViewConfigUpdate::default()
         };
 
-        if self.session.update_view_config(config).is_ok() {
-            let session = self.session.clone();
-            let renderer = self.renderer.clone();
-            ApiFuture::spawn(async move {
-                renderer.apply_pending_plugin()?;
-                renderer.draw(session.validate().await?.create_view()).await
-            });
+        if let Ok(task) = apply_and_render(&self.session, &self.renderer, config) {
+            spawn_owned("inactive-column", task);
         }
     }
 }

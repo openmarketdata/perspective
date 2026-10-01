@@ -13,21 +13,21 @@
 use std::collections::HashSet;
 
 use perspective_client::config::*;
-use perspective_js::utils::ApiFuture;
 use web_sys::*;
 use yew::prelude::*;
 
 use super::InPlaceColumn;
 use super::aggregate_selector::*;
+use super::column_selector_column_row::ColumnSelectorColumnRow;
 use super::expr_edit_button::*;
 use crate::components::column_dropdown::ColumnDropDownElement;
 use crate::components::column_selector::{EmptyColumn, InvalidColumn};
-use crate::components::type_icon::TypeIcon;
 use crate::config::ColumnSelectMode;
-use crate::presentation::{ColumnLocator, Presentation};
+use crate::presentation::{ColumnSettingsTarget, Presentation};
 use crate::queries::*;
 use crate::renderer::*;
 use crate::session::*;
+use crate::tasks::apply_and_render;
 use crate::utils::*;
 
 #[derive(Clone, Properties)]
@@ -51,7 +51,7 @@ pub struct ActiveColumnProps {
     pub onselect: Callback<()>,
 
     /// Fires when this component's expression/config button is clicked.
-    pub on_open_expr_panel: Callback<ColumnLocator>,
+    pub on_open_expr_panel: Callback<ColumnSettingsTarget>,
 
     /// Is this column in a grouped context (does the aggregate selector
     /// need to be visible)?
@@ -65,6 +65,17 @@ pub struct ActiveColumnProps {
     /// so that changes to session metadata trigger a re-render via prop diff.
     #[prop_or_default]
     pub is_expression: bool,
+
+    /// Whether this column is a window column.
+    #[prop_or_default]
+    pub is_window: bool,
+
+    /// Whether this column's `columns_config` entry holds overridden keys.
+    #[prop_or_default]
+    pub is_modified: bool,
+
+    #[prop_or_default]
+    pub is_last_column: bool,
 
     /// Whether the expression/config edit button should be shown.  Computed
     /// by the parent (`is_expression || can_render_column_styles`).
@@ -95,6 +106,8 @@ impl PartialEq for ActiveColumnProps {
             && self.is_aggregated == rhs.is_aggregated
             && self.is_editing == rhs.is_editing
             && self.is_expression == rhs.is_expression
+            && self.is_window == rhs.is_window
+            && self.is_modified == rhs.is_modified
             && self.show_edit_btn == rhs.show_edit_btn
             && self.col_type == rhs.col_type
             && self.metadata == rhs.metadata
@@ -162,11 +175,8 @@ impl Component for ActiveColumn {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("active-column", task);
                     }
                 }
 
@@ -190,11 +200,8 @@ impl Component for ActiveColumn {
                 {
                     let session = ctx.props().session.clone();
                     let renderer = ctx.props().renderer.clone();
-                    if session.update_view_config(update).is_ok() {
-                        ApiFuture::spawn(async move {
-                            renderer.apply_pending_plugin()?;
-                            renderer.draw(session.validate().await?.create_view()).await
-                        });
+                    if let Ok(task) = apply_and_render(&session, &renderer, update) {
+                        spawn_owned("active-column", task);
                     }
                 }
 
@@ -210,14 +217,15 @@ impl Component for ActiveColumn {
             Named(String),
         }
 
-        let mut classes = classes!["column-selector-draggable"];
-        if ctx.props().is_aggregated {
-            classes.push("show-aggregate");
-        };
+        let mut classes = classes![];
 
         let mut outer_classes = classes!["column-selector-column"];
         if self.mouseover {
             outer_classes.push("dragdrop-hover");
+        }
+
+        if ctx.props().is_modified {
+            outer_classes.push("is-modified");
         }
 
         let name = match &ctx.props().name {
@@ -291,7 +299,7 @@ impl Component for ActiveColumn {
                     <div
                         class={outer_classes}
                         data-label={label}
-                        style={format!("--default-column-title:var(--column-selector-column-{path}--content)")}
+                        style={format!("--default-column-title:var(--psp-label--column-{path}--content)")}
                         data-index={ctx.props().idx.to_string()}
                         ondragenter={ondragenter.clone()}
                     >
@@ -305,7 +313,7 @@ impl Component for ActiveColumn {
                     <div
                         class={outer_classes}
                         data-label={label}
-                        style={format!("--default-column-title:var(--column-selector-column-{path}--content)")}
+                        style={format!("--default-column-title:var(--psp-label--column-{path}--content)")}
                         data-index={ctx.props().idx.to_string()}
                         ondragenter={ondragenter.clone()}
                     >
@@ -314,7 +322,9 @@ impl Component for ActiveColumn {
                 }
             },
             ((label, ColumnState::Named(name)), Some(col_type)) => {
-                let is_required = ctx.props().get_is_required(ctx.props().idx);
+                let is_required =
+                    ctx.props().is_last_column || ctx.props().get_is_required(ctx.props().idx);
+
                 let remove_column = if is_required {
                     None
                 } else {
@@ -334,11 +344,12 @@ impl Component for ActiveColumn {
                     let event_name = name.to_owned();
                     let presentation = ctx.props().presentation.clone();
                     move |event: DragEvent| {
-                        presentation.set_drag_image(&event).unwrap();
-                        presentation.notify_drag_start(
-                            event_name.to_string(),
-                            DragEffect::Move(DragTarget::Active),
-                        );
+                        if presentation.set_drag_image(&event) {
+                            presentation.notify_drag_start(
+                                event_name.to_string(),
+                                DragEffect::Move(DragTarget::Active),
+                            );
+                        }
 
                         MouseLeave(false)
                     }
@@ -350,6 +361,7 @@ impl Component for ActiveColumn {
                     .callback(|event: MouseEvent| MouseEnter(event.which() == 0));
 
                 let is_expression = ctx.props().is_expression;
+                let is_window = ctx.props().is_window;
                 let show_edit_btn = ctx.props().show_edit_btn;
                 let mut class = ctx.props().renderer.metadata().select_mode.css();
                 if is_required {
@@ -362,24 +374,21 @@ impl Component for ActiveColumn {
                     <div
                         class={outer_classes}
                         data-label={label}
-                        style={format!("--default-column-title:var(--column-selector-column-{path}--content)")}
+                        style={format!("--default-column-title:var(--psp-label--column-{path}--content)")}
                         data-index={ctx.props().idx.to_string()}
                         {onmouseover}
                         {onmouseout}
                         ondragenter={ondragenter.clone()}
                     >
                         <span {class} onmousedown={remove_column} />
-                        <div
-                            class={classes}
-                            ref={&self.add_expression_ref}
-                            draggable="true"
-                            {ondragstart}
-                            {ondragend}
-                        >
-                            <div class="column-selector-column-border">
-                                <span class="drag-handle icon" />
-                                <TypeIcon ty={col_type} />
-                                if ctx.props().is_aggregated {
+                        <ColumnSelectorColumnRow
+                            name={name.clone()}
+                            col_type={Some(col_type)}
+                            wrapper_class={classes}
+                            wrapper_ref={&self.add_expression_ref}
+                            ondragstart={Some(ondragstart)}
+                            ondragend={Some(ondragend.clone())}
+                            aggregate={ctx.props().is_aggregated.then(|| html! {
                                     <AggregateSelector
                                         column={name.clone()}
                                         aggregate={ctx.props().get_aggregate(&name)}
@@ -388,24 +397,18 @@ impl Component for ActiveColumn {
                                         renderer={&ctx.props().renderer}
                                         session={&ctx.props().session}
                                     />
-                                }
-                                <span
-                                    class="column_name"
-                                >
-                                    { name.clone() }
-                                </span>
-                                if !ctx.props().is_aggregated {
-                                    <span class="column-selector--spacer" />
-                                }
+                                })}
+                            trailing={html! {
                                 <ExprEditButton
+                                    {is_window}
                                     name={name.clone()}
                                     on_open_expr_panel={&ctx.props().on_open_expr_panel}
                                     {is_expression}
                                     is_disabled={!show_edit_btn}
                                     is_editing={ctx.props().is_editing}
                                 />
-                            </div>
-                        </div>
+                            }}
+                        />
                     </div>
                 }
             },
@@ -477,13 +480,8 @@ impl ActiveColumnProps {
             ..ViewConfigUpdate::default()
         };
 
-        if self.session.update_view_config(config).is_ok() {
-            let session = self.session.clone();
-            let renderer = self.renderer.clone();
-            ApiFuture::spawn(async move {
-                renderer.apply_pending_plugin()?;
-                renderer.draw(session.validate().await?.create_view()).await
-            });
+        if let Ok(task) = apply_and_render(&self.session, &self.renderer, config) {
+            spawn_owned("active-column", task);
         }
     }
 }

@@ -19,21 +19,23 @@ use yew::prelude::*;
 use super::column_selector::ColumnSelector;
 use super::plugin_selector::PluginSelector;
 use super::plugin_tab::PluginTab;
-use crate::components::containers::sidebar_close_button::SidebarCloseButton;
-use crate::components::form::debug::DebugPanel;
-use crate::config::PluginUpdate;
-use crate::presentation::{ColumnLocator, OpenColumnSettings, Presentation};
+use crate::components::debug_panel::DebugPanel;
+use crate::config::{PluginStaticConfig, PluginUpdate};
+use crate::presentation::{ColumnLocator, ColumnSettingsTarget, OpenColumnSettings, Presentation};
+use crate::queries::classify_column;
 use crate::renderer::*;
 use crate::session::column_defaults_update::*;
 use crate::session::*;
-use crate::tasks::update_and_render;
+use crate::tasks::update_plugin_and_render;
+use crate::ui::SidebarCloseButton;
 use crate::utils::*;
+use crate::workspace::Workspace;
 
 #[derive(Clone, Properties)]
 pub struct SettingsPanelProps {
     pub on_close: Callback<()>,
     pub on_resize: Rc<PubSub<()>>,
-    pub on_select_column: Callback<Option<ColumnLocator>>,
+    pub on_select_column: Callback<Option<ColumnSettingsTarget>>,
     pub on_debug: Callback<()>,
     pub is_debug: bool,
 
@@ -42,12 +44,25 @@ pub struct SettingsPanelProps {
     pub available_plugins: PtrEqRc<Vec<String>>,
     pub has_table: Option<TableLoadState>,
     pub named_column_count: usize,
+
+    /// The ACTIVE plugin's declared contract, threaded as a value prop so
+    /// that switching plugins re-renders the panes that read it. The
+    /// renderer handle cannot serve this: it is excluded from prop
+    /// equality (it is a handle, not a value), so a plugin swap that
+    /// leaves the view config untouched — Y Line back to Datagrid, both
+    /// of which name one column slot — would otherwise change nothing any
+    /// component compares.
+    pub plugin_static_config: Rc<PluginStaticConfig>,
     pub view_config: PtrEqRc<ViewConfig>,
 
     /// Snapshot of the active plugin's `plugin_config` bucket, threaded
     /// from `RendererProps`. Forwarded into `PluginTab` so the tab is
     /// prop-driven instead of reading `Renderer` directly.
     pub plugin_config: PtrEqRc<serde_json::Map<String, serde_json::Value>>,
+
+    /// Snapshot of the active plugin's `columns_config` bucket, threaded
+    /// from `RendererProps` into `ColumnSelector`.
+    pub columns_config: PtrEqRc<ColumnConfigMap>,
 
     /// Column currently being dragged (if any) — threaded to show drag
     /// highlights without per-component `DragDrop` PubSub subscriptions.
@@ -90,6 +105,7 @@ pub struct SettingsPanelProps {
     pub session: Session,
     pub renderer: Renderer,
     pub presentation: Presentation,
+    pub workspace: Workspace,
 }
 
 impl PartialEq for SettingsPanelProps {
@@ -99,8 +115,10 @@ impl PartialEq for SettingsPanelProps {
             && self.available_plugins == rhs.available_plugins
             && self.has_table == rhs.has_table
             && self.named_column_count == rhs.named_column_count
+            && self.plugin_static_config == rhs.plugin_static_config
             && self.view_config == rhs.view_config
             && self.plugin_config == rhs.plugin_config
+            && self.columns_config == rhs.columns_config
             && self.drag_column == rhs.drag_column
             && self.metadata == rhs.metadata
             && self.open_column_settings == rhs.open_column_settings
@@ -116,6 +134,11 @@ pub enum SelectedTab {
     Query,
     Plugin,
     Debug,
+
+    /// The embedded LLM agent's chat panel. The variant exists in every
+    /// build; its tab button and body render only under the `llm-agent`
+    /// feature, and only once `agentConfig()` has been called.
+    Chat,
 }
 
 #[function_component]
@@ -128,25 +151,28 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
     } = &props;
 
     let selected_column = {
-        let locator = props.open_column_settings.locator.clone();
         let config = &props.view_config;
-        locator.filter(|locator| match locator {
-            ColumnLocator::Table(_name) => {
-                locator
-                    .name()
-                    .map(|n| {
-                        config.columns.iter().any(|maybe_col| {
-                            maybe_col.as_ref().map(|col| col == n).unwrap_or_default()
-                        }) || config.group_by.iter().any(|col| col == n)
-                            || config.split_by.iter().any(|col| col == n)
-                            || config.filter.iter().any(|col| col.column() == n)
-                            || config.sort.iter().any(|col| &col.0 == n)
-                    })
-                    .unwrap_or_default()
-                    && props.renderer.can_render_column_styles()
-            },
-            _ => true,
-        })
+        props
+            .open_column_settings
+            .target
+            .as_ref()
+            .and_then(|target| match target {
+                ColumnSettingsTarget::NewExpression => Some(ColumnLocator::NewExpression),
+                ColumnSettingsTarget::Column(n) => {
+                    let locator = classify_column(n, config, &props.metadata)?;
+                    if !matches!(locator, ColumnLocator::Table(_)) {
+                        return Some(locator);
+                    }
+
+                    let used = config.columns.iter().any(|maybe_col| {
+                        maybe_col.as_ref().map(|col| col == n).unwrap_or_default()
+                    }) || config.group_by.iter().any(|col| col == n)
+                        || config.split_by.iter().any(|col| col == n)
+                        || config.filter.iter().any(|col| col.column() == n)
+                        || config.sort.iter().any(|col| &col.0 == n);
+                    (used && props.renderer.can_render_column_styles()).then_some(locator)
+                },
+            })
     };
 
     let plugin_name = props.plugin_name.clone();
@@ -161,7 +187,7 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
     let on_auto_width = props.on_auto_width.clone();
 
     // Dispatch callback: captures engine handles, constructs config update,
-    // hands the apply+draw work to `tasks::update_and_render`.
+    // hands the apply+draw work to `tasks::pipeline`.
     let on_select_plugin = {
         clone!(renderer, session, presentation);
         let session_metadata = props.metadata.clone();
@@ -170,27 +196,43 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
             if session.is_errored() {
                 return;
             }
-            let metadata = renderer.get_next_plugin_metadata(&PluginUpdate::Update(plugin_name));
+            // Pure resolve — the swap itself is committed inside the locked
+            // draw task by `update_plugin_and_render`, never staged on the
+            // `Renderer` where a concurrent draw could observe it.
+            let resolved_plugin =
+                renderer.resolve_plugin_update(&PluginUpdate::Update(plugin_name));
             let prev_metadata = renderer.metadata();
-            let plugin_config = metadata.as_deref().unwrap_or(&*prev_metadata);
+            let plugin_config = resolved_plugin
+                .as_ref()
+                .map(|(_, metadata)| &**metadata)
+                .unwrap_or(&*prev_metadata);
             let rollup_features = session_metadata
                 .get_features()
                 .map(|x| x.get_group_rollup_modes())
                 .unwrap();
 
             let group_rollups = plugin_config.get_group_rollups(&rollup_features);
+            let split_rollup_features = session_metadata
+                .get_features()
+                .map(|x| x.get_split_rollup_modes())
+                .unwrap();
+
+            let split_rollups = plugin_config.get_split_rollups(&split_rollup_features);
             let mut update = ViewConfigUpdate {
                 group_rollup_mode: group_rollups.first().cloned(),
+                split_rollup_mode: split_rollups.first().cloned(),
                 ..ViewConfigUpdate::default()
             };
 
             update.set_update_column_defaults(
                 &session_metadata,
+                &view_config,
                 &view_config.columns,
                 plugin_config,
             );
 
-            if let Ok(task) = update_and_render(&session, &renderer, update) {
+            let plugin_idx = resolved_plugin.map(|(idx, _)| idx);
+            if let Ok(task) = update_plugin_and_render(&session, &renderer, update, plugin_idx) {
                 ApiFuture::spawn(task);
             }
 
@@ -229,6 +271,52 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
         }
     };
 
+    // The chat tab is zero-affordance until `agentConfig()` is called; the
+    // subscription re-renders this panel when that happens (and as the
+    // transcript updates while the chat body is mounted).
+    #[cfg(feature = "llm-agent")]
+    let (chat_tab_button, chat_body) = {
+        let update = use_force_update();
+        let agent = presentation.agent.clone();
+        use_effect_with((), move |_| {
+            let sub = agent
+                .on_update
+                .add_notify_listener(&Callback::from(move |_| update.force_update()));
+
+            move || drop(sub)
+        });
+
+        let button = if presentation.agent.is_configured() {
+            let on_select_column = props.on_select_column.clone();
+            let set_chat = {
+                let on_select_tab = props.on_select_tab.clone();
+                Callback::from(move |_: PointerEvent| {
+                    on_select_tab.emit(SelectedTab::Chat);
+                    on_select_column.emit(None)
+                })
+            };
+
+            html! {
+                <div
+                    id="chat_tabbar_tab"
+                    class={tab_class(selected, SelectedTab::Chat)}
+                    onpointerdown={set_chat}
+                />
+            }
+        } else {
+            html! {}
+        };
+
+        let body = html! {
+            <crate::components::chat_panel::ChatPanel agent={presentation.agent.clone()} />
+        };
+
+        (button, body)
+    };
+
+    #[cfg(not(feature = "llm-agent"))]
+    let (chat_tab_button, chat_body) = (html! {}, html! {});
+
     let on_open_expr_panel = use_callback(props.on_select_column.clone(), |c, on_select| {
         on_select.emit(Some(c))
     });
@@ -262,6 +350,7 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
                     class={tab_class(selected, SelectedTab::Debug)}
                     onpointerdown={set_debug}
                 />
+                { chat_tab_button }
             </div>
             if selected == SelectedTab::Query {
                 <ColumnSelector
@@ -270,7 +359,9 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
                     {selected_column}
                     has_table={props.has_table.clone()}
                     named_column_count={props.named_column_count}
+                    plugin_static_config={props.plugin_static_config.clone()}
                     view_config={props.view_config.clone()}
+                    columns_config={props.columns_config.clone()}
                     drag_column={props.drag_column.clone()}
                     metadata={props.metadata.clone()}
                     selected_theme={props.selected_theme.clone()}
@@ -285,16 +376,20 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
                 <PluginTab
                     view_config={props.view_config.clone()}
                     plugin_config={props.plugin_config.clone()}
+                    presentation={presentation.clone()}
                     renderer={renderer.clone()}
                     session={session.clone()}
                 // initial_width={width}
                 // on_auto_width={on_auto_width.clone()}
                 />
+            } else if selected == SelectedTab::Chat {
+                { chat_body }
             } else {
                 <DebugPanel
                     {presentation}
                     {renderer}
                     {session}
+                    workspace={props.workspace.clone()}
                     initial_width={width}
                     on_auto_width={on_auto_width.clone()}
                 />
@@ -302,7 +397,10 @@ pub fn SettingsPanel(props: &SettingsPanelProps) -> Html {
             // Sibling sizer keeps the panel width pinned across tab
             // switches; lives outside the tab-body so it survives the
             // tab subtree's unmount.
-            <div class="scroll-panel-auto-width" style={format!("width:{}px", width)} />
+            <div
+                class="scroll-panel-auto-width"
+                style={format!("width:{}px", width)}
+            />
         </div>
     }
 }

@@ -1,7 +1,7 @@
 {
     "name": "webpack-example",
     "private": true,
-    "version": "4.5.1",
+    "version": "5.5.1",
     "description": "An example app built using `@perspective-dev/viewer`.",
     "scripts": {
         "webpack_build": "webpack",
@@ -10,10 +10,10 @@
     "keywords": [],
     "license": "Apache-2.0",
     "dependencies": {
-        "@perspective-dev/client": "workspace:",
-        "@perspective-dev/viewer": "workspace:",
-        "@perspective-dev/viewer-charts": "workspace:",
-        "@perspective-dev/viewer-datagrid": "workspace:"
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
+        "@perspective-dev/viewer-charts": "workspace:^",
+        "@perspective-dev/viewer-datagrid": "workspace:^"
     },
     "devDependencies": {
         "arraybuffer-loader": "catalog:",

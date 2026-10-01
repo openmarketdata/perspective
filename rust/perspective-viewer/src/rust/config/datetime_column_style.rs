@@ -10,13 +10,11 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-mod color_mode;
 mod custom;
 mod custom_format;
 mod simple;
 mod simple_format;
 
-pub use color_mode::*;
 pub use custom::*;
 pub use custom_format::*;
 use serde::{Deserialize, Serialize};
@@ -41,10 +39,6 @@ impl Default for DatetimeFormatType {
 }
 
 impl DatetimeFormatType {
-    fn is_simple(&self) -> bool {
-        self == &Self::Simple(SimpleDatetimeStyleConfig::default())
-    }
-
     pub fn time_zone(&self) -> &Option<String> {
         match self {
             DatetimeFormatType::Custom(x) => &x.time_zone,
@@ -62,33 +56,11 @@ impl DatetimeFormatType {
 
 /// A model for the JSON serialized style configuration for a column of type
 /// `datetime`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 // #[derive(WasmDescribe!, FromWasmAbi!)]
 pub struct DatetimeColumnStyleConfig {
     #[serde(default)]
-    #[serde(skip_serializing_if = "DatetimeFormatType::is_simple")]
-    pub date_format: DatetimeFormatType,
-
-    #[serde(default)]
-    #[serde(skip_serializing_if = "DatetimeColorMode::is_none")]
-    pub datetime_color_mode: DatetimeColorMode,
-
-    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(skip)]
-    pub color: Option<String>,
-}
-
-impl Default for DatetimeColumnStyleConfig {
-    fn default() -> Self {
-        Self {
-            date_format: DatetimeFormatType::Simple(SimpleDatetimeStyleConfig {
-                time_zone: Default::default(),
-                date_style: SimpleDatetimeFormat::Short,
-                time_style: SimpleDatetimeFormat::Medium,
-            }),
-            datetime_color_mode: Default::default(),
-            color: Default::default(),
-        }
-    }
+    #[ts(optional, as = "Option<_>")]
+    pub date_format: Option<DatetimeFormatType>,
 }

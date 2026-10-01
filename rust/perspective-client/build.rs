@@ -54,11 +54,24 @@ fn prost_build() -> Result<()> {
         prost_build::Config::new()
             // .bytes(["ViewToArrowResp.arrow", "from_arrow"])
             .type_attribute("ViewOnUpdateResp", "#[derive(ts_rs::TS)]")
-            .field_attribute("ViewOnUpdateResp.delta", "#[ts(as = \"Vec::<u8>\")]")
+            .field_attribute(
+                "ViewOnUpdateResp.delta",
+                "#[ts(type = \"Uint8Array | undefined\")]",
+            )
             .field_attribute("ViewOnUpdateResp.delta", "#[serde(with = \"serde_bytes\")]")
+            .type_attribute("ViewOnRemoveResp", "#[derive(ts_rs::TS)]")
+            .field_attribute("ViewOnRemoveResp.indices", "#[ts(type = \"Uint8Array\")]")
+            .field_attribute(
+                "ViewOnRemoveResp.indices",
+                "#[serde(with = \"serde_bytes\")]",
+            )
             .type_attribute("ColumnType", "#[derive(ts_rs::TS)]")
             .type_attribute(
                 "JoinType",
+                "#[derive(serde::Deserialize, ts_rs::TS)] #[serde(rename_all = \"snake_case\")]",
+            )
+            .type_attribute(
+                "ListFlatten",
                 "#[derive(serde::Deserialize, ts_rs::TS)] #[serde(rename_all = \"snake_case\")]",
             )
             .field_attribute("ViewToArrowResp.arrow", "#[serde(skip)]")
@@ -66,12 +79,14 @@ fn prost_build() -> Result<()> {
             .type_attribute(".", "#[derive(serde::Serialize)]")
             .type_attribute("ViewPort", "#[derive(serde::Deserialize)]")
             .type_attribute("ViewDimensionsResp", "#[derive(serde::Deserialize)]")
-            .type_attribute("TableValidateExprResp", "#[derive(serde::Deserialize)]")
+            .type_attribute("TableDescribeResp", "#[derive(serde::Deserialize)]")
+            .type_attribute("TableDescribeResp.result", "#[derive(serde::Deserialize)]")
+            .type_attribute("ViewDescription", "#[derive(serde::Deserialize)]")
             .type_attribute(
                 "ColumnType",
                 "#[derive(serde::Deserialize)]  #[serde(rename_all = \"snake_case\")]",
             )
-            .type_attribute("ExprValidationError", "#[derive(serde::Deserialize)]")
+            .type_attribute("ExpressionError", "#[derive(serde::Deserialize)]")
             .compile_protos(&[proto_file], &[include_path])
             .unwrap();
 

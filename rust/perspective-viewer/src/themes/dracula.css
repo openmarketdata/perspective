@@ -13,14 +13,17 @@
 @import "./defaults.css";
 
 perspective-viewer,
-perspective-viewer[theme="Dracula"] {
+perspective-viewer[theme="Dracula"],
+perspective-viewer [theme="Dracula"] {
     --psp-theme-name: "Dracula";
 }
 
-perspective-viewer[theme="Dracula"] {
+perspective-viewer[theme="Dracula"],
+perspective-viewer [theme="Dracula"] {
     /* perspective-viewer-pro-dark--colors (overrides) */
     background-color: #242526;
     color: white;
+    color-scheme: dark;
     --psp--color: white;
     --psp-active--color: #2770a9;
     --psp-error--color: #ff9485;
@@ -32,16 +35,9 @@ perspective-viewer[theme="Dracula"] {
     --psp-expression--function--color: #22a0ce;
     --psp-expression--psp-error--color: rgb(255, 136, 136);
     --psp-calendar--filter: invert(1);
+    --psp-input--filter: invert(1);
     --psp-warning--color: #242526;
     --psp-warning--background: var(--psp--color);
-
-    --psp-icon--select-arrow--mask-image: var(
-        --psp-icon--select-arrow-light--mask-image
-    );
-
-    --psp-icon--select-arrow-hover--mask-image: var(
-        --psp-icon--select-arrow-dark--mask-image
-    );
 
     --psp-code-editor--symbol--color: white;
     --psp-code-editor--literal--color: #7dc3f0;
@@ -75,6 +71,16 @@ perspective-viewer[theme="Dracula"] {
     --psp-charts--series-8--color: rgb(221, 99, 103);
     --psp-charts--series-9--color: rgb(120, 104, 206);
     --psp-charts--series-10--color: rgb(23, 166, 123);
+    --psp-datagrid--series-1--color: rgb(71, 120, 194);
+    --psp-datagrid--series-2--color: rgb(204, 120, 48);
+    --psp-datagrid--series-3--color: rgb(158, 84, 192);
+    --psp-datagrid--series-4--color: rgb(51, 150, 153);
+    --psp-datagrid--series-5--color: rgb(102, 114, 143);
+    --psp-datagrid--series-6--color: rgb(211, 103, 189);
+    --psp-datagrid--series-7--color: rgb(109, 124, 77);
+    --psp-datagrid--series-8--color: rgb(221, 99, 103);
+    --psp-datagrid--series-9--color: rgb(120, 104, 206);
+    --psp-datagrid--series-10--color: rgb(23, 166, 123);
     --psp-charts--gradient--background: linear-gradient(
         #dd6367 0%,
         #242526 50%,
@@ -121,7 +127,7 @@ perspective-viewer[theme="Dracula"] {
     --theme-pink: #ff79c6;
 
     color: var(--theme-fg0);
-    background-color: var(--theme-bg0);
+    background-color: var(--theme-bg1);
     --psp--color: var(--theme-fg1);
     --psp-inactive--color: var(--theme-fg2);
     --psp-inactive--border-color: var(--theme-bg2);
@@ -145,71 +151,17 @@ perspective-viewer[theme="Dracula"] {
     --psp-charts--series-5--color: var(--theme-purple);
     --psp-charts--series-6--color: var(--theme-pink);
     --psp-charts--series-7--color: var(--theme-orange);
+    --psp-datagrid--series-1--color: var(--theme-blue);
+    --psp-datagrid--series-2--color: var(--theme-red);
+    --psp-datagrid--series-3--color: var(--theme-green);
+    --psp-datagrid--series-4--color: var(--theme-yellow);
+    --psp-datagrid--series-5--color: var(--theme-purple);
+    --psp-datagrid--series-6--color: var(--theme-pink);
+    --psp-datagrid--series-7--color: var(--theme-orange);
 
     --psp-charts--gradient--background: linear-gradient(
         var(--theme-red),
         var(--theme-bg0),
         var(--theme-blue)
     ) !important;
-}
-
-perspective-copy-menu[theme="Dracula"],
-perspective-export-menu[theme="Dracula"],
-perspective-dropdown[theme="Dracula"] {
-    /* perspective-viewer-pro-dark--colors (overrides) */
-    background-color: #242526;
-    color: white;
-    --psp--color: white;
-    --psp-active--color: #2770a9;
-    --psp-error--color: #ff9485;
-    --psp-inactive--color: #61656e;
-    --psp-inactive--border-color: #4c505b;
-    --psp--background-color: #242526;
-    --psp-active--background: rgba(39, 113, 170, 0.5);
-    --psp-expression--operator--color: #c5c9d0;
-    --psp-expression--function--color: #22a0ce;
-    --psp-expression--psp-error--color: rgb(255, 136, 136);
-    --psp-calendar--filter: invert(1);
-    --psp-warning--color: #242526;
-    --psp-warning--background: var(--psp--color);
-    --psp-icon--select-arrow--mask-image: var(
-        --psp-icon--select-arrow-light--mask-image
-    );
-    --psp-icon--select-arrow-hover--mask-image: var(
-        --psp-icon--select-arrow-dark--mask-image
-    );
-    --psp-code-editor--symbol--color: white;
-    --psp-code-editor--literal--color: #7dc3f0;
-    --psp-code-editor--operator--color: rgb(23, 166, 123);
-    --psp-code-editor--comment--color: rgb(204, 120, 48);
-    --psp-code-editor--column--color: #e18ee1;
-
-    border: 1px solid #4c505b;
-
-    /* perspective-viewer-dracula--colors */
-    --theme-bg0: #191a22;
-    --theme-bg1: #282a36;
-    --theme-bg2: #44475a;
-    --theme-gray: #928374;
-    --theme-fg0: #f8f8f2;
-    --theme-fg1: #6272a4;
-    --theme-fg2: #44475a;
-    --theme-red: #ff5555;
-    --theme-green: #50fa7b;
-    --theme-yellow: #f1fa8c;
-    --theme-blue: #8be9fd;
-    --theme-purple: #bd93f9;
-    --theme-orange: #ffb86c;
-    --theme-pink: #ff79c6;
-
-    color: var(--theme-fg0);
-    --psp--color: var(--theme-fg1);
-    --psp-inactive--color: var(--theme-fg2);
-    --psp-inactive--border-color: var(--theme-bg2);
-    --psp--background-color: var(--theme-bg1);
-    --psp-status-icon--connected--color: var(--theme-green);
-    --psp-status-icon--initializing--color: var(--theme-yellow);
-    --psp-status-icon--psp-error--color: var(--theme-red);
-
-    background-color: var(--theme-bg0);
 }

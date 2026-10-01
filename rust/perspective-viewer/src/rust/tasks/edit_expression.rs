@@ -17,15 +17,23 @@
 use perspective_client::clone;
 use perspective_client::config::{Expression, ViewConfigUpdate};
 
-use super::update_and_render;
-use crate::presentation::{ColumnLocator, ColumnSettingsTab, OpenColumnSettings, Presentation};
+use super::apply_and_render;
+use crate::presentation::{
+    ColumnSettingsTab, ColumnSettingsTarget, OpenColumnSettings, Presentation,
+};
 use crate::renderer::Renderer;
 use crate::session::Session;
 use crate::*;
 
-/// Replace the expression at `old_name` with `new_expr` and re-render.  After
-/// the render completes, opens the column-settings drawer on the renamed
-/// expression.
+fn reopen(presentation: &Presentation, name: String) {
+    presentation.set_open_column_settings(Some(OpenColumnSettings {
+        target: Some(ColumnSettingsTarget::Column(name)),
+        tab: Some(ColumnSettingsTab::Attributes),
+    }));
+}
+
+/// Replace the expression at `old_name` with `new_expr` and re-render,
+/// moving the column-settings drawer onto the renamed expression.
 pub fn update_expr(
     session: &Session,
     renderer: &Renderer,
@@ -39,45 +47,33 @@ pub fn update_expr(
             .to_props()
             .create_replace_expression_update(&old_name, &new_expr);
 
-        update_and_render(&session, &renderer, update)?.await?;
-        presentation.set_open_column_settings(Some(OpenColumnSettings {
-            locator: Some(ColumnLocator::Expression(new_expr.name.to_string())),
-            tab: Some(ColumnSettingsTab::Attributes),
-        }));
-
+        let run = apply_and_render(&session, &renderer, update)?;
+        reopen(&presentation, new_expr.name.to_string());
+        run.await?;
         Ok(())
     });
 }
 
-/// Insert `expr` into the session's expressions and re-render.  After the
-/// render completes, opens the column-settings drawer on the new expression.
+/// Insert `expr` into the session's expressions and re-render, moving the
+/// column-settings drawer onto the new expression.
 pub fn save_expr(
     session: &Session,
     renderer: &Renderer,
     presentation: &Presentation,
     expr: Expression,
 ) -> ApiResult<()> {
-    let presentation = presentation.clone();
     let expr_name: String = expr.name.clone().into();
     let task = {
         let mut serde_exprs = session.get_view_config().expressions.clone();
         serde_exprs.insert(&expr);
-        update_and_render(session, renderer, ViewConfigUpdate {
+        apply_and_render(session, renderer, ViewConfigUpdate {
             expressions: Some(serde_exprs),
             ..Default::default()
         })
     }?;
 
-    ApiFuture::spawn(async move {
-        task.await?;
-        presentation.set_open_column_settings(Some(OpenColumnSettings {
-            locator: Some(ColumnLocator::Expression(expr_name)),
-            tab: Some(ColumnSettingsTab::Attributes),
-        }));
-
-        Ok(())
-    });
-
+    reopen(presentation, expr_name);
+    ApiFuture::spawn(task);
     Ok(())
 }
 
@@ -90,7 +86,7 @@ pub fn delete_expr(session: &Session, renderer: &Renderer, expr_name: &str) -> A
         ..ViewConfigUpdate::default()
     };
 
-    let task = update_and_render(session, renderer, config)?;
+    let task = apply_and_render(session, renderer, config)?;
     ApiFuture::spawn(task);
     Ok(())
 }

@@ -14,7 +14,7 @@ use perspective_client::config::ColumnType;
 use web_sys::*;
 use yew::prelude::*;
 
-use crate::components::containers::dragdrop_list::*;
+use crate::components::dragdrop_list::*;
 use crate::components::type_icon::TypeIcon;
 use crate::presentation::Presentation;
 use crate::session::*;
@@ -73,8 +73,9 @@ impl Component for PivotColumn {
             let presentation = ctx.props().presentation.clone();
             let action = ctx.props().action;
             move |event: DragEvent| {
-                presentation.set_drag_image(&event).unwrap();
-                presentation.notify_drag_start(event_name.to_string(), DragEffect::Move(action))
+                if presentation.set_drag_image(&event) {
+                    presentation.notify_drag_start(event_name.to_string(), DragEffect::Move(action))
+                }
             }
         });
 

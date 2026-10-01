@@ -10,8 +10,12 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use perspective_js::JsViewWindow;
 use perspective_js::utils::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use crate::config::PluginStaticConfig;
@@ -25,6 +29,7 @@ extern "C" {
     #[derive(Clone)]
     pub type JsPerspectiveViewer;
 
+    /// A `<perspective-viewer>` plugin custom element.
     #[derive(Clone)]
     pub type JsPerspectiveViewerPlugin;
 
@@ -46,29 +51,48 @@ extern "C" {
     /// call — the view re-renders and re-queries the schema once the
     /// async fetch resolves.
     #[wasm_bindgen(method, catch, js_name = column_config_schema)]
-    pub fn _column_config_schema(this: &JsPerspectiveViewerPlugin, view_type: &str, group: Option<&str>, column_name: &str, current_value: &JsValue, view_config: &JsValue, column_stats: &JsValue) -> ApiResult<JsValue>;
+    pub fn _column_config_schema(this: &JsPerspectiveViewerPlugin, view_type: &str, group: Option<&str>, column_name: &str, current_value: &JsValue, view_config: &JsValue, plugin_config: &JsValue) -> ApiResult<JsValue>;
 
+    /// The plugin-level settings schema as it applies to `current_value`, the
+    /// `plugin_config` state the schema should describe.
     #[wasm_bindgen(method, catch, js_name = plugin_config_schema)]
-    pub fn _plugin_config_schema(this: &JsPerspectiveViewerPlugin, view_config: &JsValue) -> ApiResult<JsValue>;
+    pub fn _plugin_config_schema(this: &JsPerspectiveViewerPlugin, view_config: &JsValue, current_value: &JsValue) -> ApiResult<JsValue>;
 
+    /// STATE TRANSFER, not rendering (dispatch semantics, rule for
+    /// `restore`/`save`): deliver a `plugin_config` + `columns_config`
+    /// snapshot into the plugin. Sync and lock-exempt. The host pairs a
+    /// restore that genuinely CHANGED plugin state with exactly one
+    /// `update` in the same locked run (update source 3) — plugins must
+    /// not render from `restore()` themselves, and must not call host
+    /// APIs from inside it (the echo rule: a plugin-issued `restorePanel`
+    /// re-enters through the PUBLIC surface, indistinguishable from a
+    /// user call — the initial-load double-render bug). Prefer the typed
+    /// [`JsPerspectiveViewerPlugin::restore`] wrapper.
     #[wasm_bindgen(method, js_name=restore, catch)]
     pub fn _restore(this: &JsPerspectiveViewerPlugin, token: &JsValue, columns_config: &JsValue) -> ApiResult<()>;
 
+    /// Free the plugin's resources. Serialized like the rendering methods —
+    /// callers route through the draw lock (`Renderer::dispose`/`delete`
+    /// defer teardown through it; a sync `delete` mid-`draw` violates the
+    /// call discipline).
     #[wasm_bindgen(method)]
     pub fn delete(this: &JsPerspectiveViewerPlugin);
 
-    #[wasm_bindgen(method)]
-    pub fn restyle(
+    #[wasm_bindgen(method, js_name = restyle)]
+    fn _restyle(
         this: &JsPerspectiveViewerPlugin,
     );
 
-    #[wasm_bindgen(method, catch)]
-    pub async fn render(
+    #[wasm_bindgen(method, catch, js_name = render)]
+    async fn _render(
         this: &JsPerspectiveViewerPlugin,
         view: perspective_js::View,
         viewport: Option<JsViewWindow>,
     ) -> ApiResult<web_sys::Blob>;
 
+    /// Full render of a `View` that is NEW to this plugin — dispatched iff
+    /// `bind_view` REBUILT the engine `View`. The only REQUIRED rendering
+    /// method.
     #[wasm_bindgen(method, catch)]
     pub async fn draw(
         this: &JsPerspectiveViewerPlugin,
@@ -78,8 +102,8 @@ extern "C" {
         force: bool
     ) -> ApiResult<()>;
 
-    #[wasm_bindgen(method, catch)]
-    pub async fn update(
+    #[wasm_bindgen(method, catch, js_name = update)]
+    async fn _update(
         this: &JsPerspectiveViewerPlugin,
         view: perspective_js::View,
         column_limit: Option<usize>,
@@ -87,17 +111,65 @@ extern "C" {
         force: bool
     ) -> ApiResult<()>;
 
-    #[wasm_bindgen(method, catch)]
-    pub async fn clear(this: &JsPerspectiveViewerPlugin) -> ApiResult<JsValue>;
+    #[wasm_bindgen(method, catch, js_name = clear)]
+    async fn _clear(this: &JsPerspectiveViewerPlugin) -> ApiResult<JsValue>;
 
-    #[wasm_bindgen(method, catch)]
-    pub async fn resize(this: &JsPerspectiveViewerPlugin) -> ApiResult<JsValue>;
+    #[wasm_bindgen(method, catch, js_name = resize)]
+    async fn _resize(this: &JsPerspectiveViewerPlugin) -> ApiResult<JsValue>;
 
+    #[wasm_bindgen(method, catch, js_name = deselect)]
+    async fn _deselect(this: &JsPerspectiveViewerPlugin) -> ApiResult<()>;
+
+    #[wasm_bindgen(method, catch, js_name = presize)]
+    async fn _presize(this: &JsPerspectiveViewerPlugin, width: f64, height: f64) -> ApiResult<JsValue>;
 }
 
 impl From<JsPluginStaticConfig> for PluginStaticConfig {
     fn from(value: JsPluginStaticConfig) -> Self {
         value.into_serde_ext().expect("Invalid plugin config")
+    }
+}
+
+/// Which OPTIONAL plugin methods a plugin implements (see "Capability
+/// tiers" on [`JsPerspectiveViewerPlugin`]). Detected once per
+/// custom-element tag — methods live on the class prototype, so every
+/// instance of a tag answers identically — and memoized; call sites read
+/// cached flags instead of running per-call `Reflect` probes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PluginCapabilities {
+    pub draw: bool,
+    pub update: bool,
+    pub resize: bool,
+    pub restyle: bool,
+    pub clear: bool,
+    pub deselect: bool,
+    pub presize: bool,
+    pub render: bool,
+}
+
+thread_local! {
+    static PLUGIN_CAPABILITIES: RefCell<HashMap<String, PluginCapabilities>> =
+        RefCell::new(HashMap::new());
+}
+
+impl PluginCapabilities {
+    fn detect(plugin: &JsPerspectiveViewerPlugin) -> Self {
+        let is_fn = |name: &str| {
+            js_sys::Reflect::get(plugin, &JsValue::from_str(name))
+                .map(|x| x.is_function())
+                .unwrap_or_default()
+        };
+
+        Self {
+            draw: is_fn("draw"),
+            update: is_fn("update"),
+            resize: is_fn("resize"),
+            restyle: is_fn("restyle"),
+            clear: is_fn("clear"),
+            deselect: is_fn("deselect"),
+            presize: is_fn("presize"),
+            render: is_fn("render"),
+        }
     }
 }
 
@@ -117,5 +189,136 @@ impl JsPerspectiveViewerPlugin {
     ) -> ApiResult<()> {
         let columns_config = JsValue::from_serde_ext(&columns_config).unwrap();
         self._restore(token, &columns_config)
+    }
+
+    /// This plugin's memoized [`PluginCapabilities`] — the first call for a
+    /// given element tag runs the `Reflect` probes; all later calls (any
+    /// instance of the tag) read the cache.
+    pub fn capabilities(&self) -> PluginCapabilities {
+        let tag = self.unchecked_ref::<web_sys::Element>().tag_name();
+        PLUGIN_CAPABILITIES.with(|cache| {
+            *cache
+                .borrow_mut()
+                .entry(tag)
+                .or_insert_with(|| PluginCapabilities::detect(self))
+        })
+    }
+
+    /// Repaint of the SAME `View` — dispatched iff one of the six
+    /// plugin-visible sources changed (see "Dispatch semantics" on
+    /// [`JsPerspectiveViewerPlugin`]); never defensively. Reaches the
+    /// plugin via [`crate::renderer::Renderer::update_bound`] (pipeline
+    /// runs — `Adopted` deltas, changed-config delivery, public no-op
+    /// refresh) or [`crate::renderer::Renderer::update_lazy`]
+    /// (`table_updated` data refreshes, the config-apply tasks, warning
+    /// dismiss), both locked. Tier fallback: a plugin without `update`
+    /// receives `draw` — it declared no incremental path, so every repaint
+    /// is a full render.
+    pub async fn update(
+        &self,
+        view: perspective_js::View,
+        column_limit: Option<usize>,
+        row_limit: Option<usize>,
+        force: bool,
+    ) -> ApiResult<()> {
+        if self.capabilities().update {
+            self._update(view, column_limit, row_limit, force).await
+        } else {
+            self.draw(view, column_limit, row_limit, force).await
+        }
+    }
+
+    /// Repaint from retained state — dispatched iff geometry or visibility
+    /// changed: box resizes (resize observers, presize sweeps, settings
+    /// toggles) and the panel-ACTIVATION chrome nudge
+    /// ([`crate::renderer::Renderer::activation_repaint`], stamped inside
+    /// one locked dispatch). Same `View`, same data, no CSS re-read —
+    /// implementations should no-op while hidden (`offsetParent == null`).
+    /// Tier fallback: no-op — CSS reflows the box and the next dispatch
+    /// repaints the content.
+    pub async fn resize(&self) -> ApiResult<JsValue> {
+        if self.capabilities().resize {
+            self._resize().await
+        } else {
+            Ok(JsValue::UNDEFINED)
+        }
+    }
+
+    /// Re-read the `--psp-*` CSS custom properties (sync). Dispatched ONLY
+    /// when the effective theme genuinely changed, state-keyed by
+    /// [`crate::renderer::Renderer::needs_restyle`] (the effective theme
+    /// vs. the one recorded at this plugin's last capture — first paint or
+    /// last restyle), from two sites: fused immediately BEFORE a
+    /// `draw`/`update` inside the same locked dispatch
+    /// (`Renderer::draw_view`, "restyle then draw" — one render pass in
+    /// the new theme), or as `Renderer::restyle_all`'s locked
+    /// restyle-then-`update` pair when no other dispatch is coming
+    /// (theme picker, `resetThemes`, default-theme discovery, restore
+    /// tails). Exception: the public `restyleElement()` API restyles
+    /// unconditionally — it is the "my external CSS changed" affordance,
+    /// outside what captured-theme state can know. (Plus one
+    /// `mount_plugin` restyle on first light-DOM mount.) Tier fallback:
+    /// no-op — the plugin re-reads CSS at its next render.
+    pub fn restyle(&self) {
+        if self.capabilities().restyle {
+            self._restyle()
+        }
+    }
+
+    /// Blank the plugin (view deleted, table removed). Tier fallback:
+    /// no-op.
+    pub async fn clear(&self) -> ApiResult<JsValue> {
+        if self.capabilities().clear {
+            self._clear().await
+        } else {
+            Ok(JsValue::UNDEFINED)
+        }
+    }
+
+    /// Offscreen export render (`copy`/`export`) — returns an image
+    /// `Blob`; not a dispatch verb (does not touch the plugin's mounted
+    /// DOM state), but still serialized under the draw lock. Tier
+    /// fallback: errors — image export is unsupported without it.
+    pub async fn render(
+        &self,
+        view: perspective_js::View,
+        viewport: Option<JsViewWindow>,
+    ) -> ApiResult<web_sys::Blob> {
+        if self.capabilities().render {
+            self._render(view, viewport).await
+        } else {
+            Err(ApiError::from("Plugin does not support image export"))
+        }
+    }
+
+    /// Clear any visible selection state (highlighted rows, pinned
+    /// tooltips) WITHOUT emitting selection events. Invoked by the host
+    /// when an element-level global filter contributed by this panel's
+    /// selection is removed (`GlobalFilterBar` chip × / "Clear"), so the
+    /// selection visual can't outlive the filter it produced.
+    /// Implementations may redraw, so callers must hold the plugin's
+    /// per-`Renderer` draw lock (see "Call discipline"). Tier fallback:
+    /// no-op.
+    pub async fn deselect(&self) -> ApiResult<()> {
+        if self.capabilities().deselect {
+            self._deselect().await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Staged presize: render at the TARGET element box `(width, height)`
+    /// offscreen — nothing on screen changes — resolving, once the frame
+    /// is staged, to a present closure that reveals it synchronously.
+    /// Callers run the closure in the same task as the layout commit the
+    /// presize anticipated (see `Renderer::presize_with_dimensions`), so
+    /// geometry and pixels land in one paint; the closure is lock-free (it
+    /// blits retained pixels, no plugin render entry). Only call when
+    /// [`Self::capabilities`] reports `presize` — plugins without it take
+    /// the held style-override path. Resolves `None` when the plugin
+    /// skipped (hidden), presenting nothing.
+    pub async fn presize(&self, width: f64, height: f64) -> ApiResult<Option<js_sys::Function>> {
+        let present = self._presize(width, height).await?;
+        Ok(present.dyn_into::<js_sys::Function>().ok())
     }
 }

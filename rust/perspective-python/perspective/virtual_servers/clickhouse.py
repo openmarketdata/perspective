@@ -15,7 +15,7 @@ import perspective
 from datetime import datetime
 import logging
 
-from perspective.virtual_servers import VirtualServerHandler
+from perspective.virtual_servers import VirtualServerHandler, sql_table_describe
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,39 @@ STRING_AGGS = [
     "countif",
     "last",
     "string_agg",
+]
+
+# Window functions. Renamed from Perspective's `stddev`/`var` to the SQL
+# standard spellings DuckDB and ClickHouse both accept, since the advertised
+# name is now emitted verbatim.
+#
+# NOTE: this set is inherited from the DuckDB handler and has NOT been audited
+# against a live ClickHouse - see the aggregate lists below, which have the
+# same problem. ClickHouse's own navigation functions are `lagInFrame` /
+# `leadInFrame`, and its ranking set differs; both need verifying before being
+# advertised here.
+FRAMES = ["rows", "range", "cumulative"]
+
+WINDOW_AGGREGATES = [
+    {"name": "sum", "frames": FRAMES, "result_type": "float"},
+    {"name": "avg", "frames": FRAMES, "result_type": "float"},
+    {"name": "count", "frames": FRAMES, "result_type": "float"},
+    {"name": "min", "frames": FRAMES},
+    {"name": "max", "frames": FRAMES},
+    {"name": "stddev_samp", "frames": FRAMES, "result_type": "float"},
+    {"name": "var_samp", "frames": FRAMES, "result_type": "float"},
+    {"name": "lag", "offset": True},
+    {"name": "lead", "offset": True},
+    {"name": "diff", "offset": True, "result_type": "float"},
+    {"name": "rate", "frames": ["range"], "result_type": "float"},
+]
+
+WINDOW_AGGREGATES_ANY = [
+    {"name": "count", "frames": FRAMES, "result_type": "float"},
+    {"name": "min", "frames": FRAMES},
+    {"name": "max", "frames": FRAMES},
+    {"name": "lag", "offset": True},
+    {"name": "lead", "offset": True},
 ]
 
 FILTER_OPS = [
@@ -119,6 +152,17 @@ class ClickhouseVirtualServerHandler(VirtualServerHandler):
                 "date": STRING_AGGS,
                 "datetime": STRING_AGGS,
             },
+            # ClickHouse has no stable `rowid`, so natural-order windows are
+            # unsupported.
+            "unordered": True,
+            "window_aggregates": {
+                "integer": WINDOW_AGGREGATES,
+                "float": WINDOW_AGGREGATES,
+                "string": WINDOW_AGGREGATES_ANY,
+                "boolean": WINDOW_AGGREGATES_ANY,
+                "date": WINDOW_AGGREGATES_ANY,
+                "datetime": WINDOW_AGGREGATES_ANY,
+            },
         }
 
     def get_hosted_tables(self):
@@ -151,13 +195,23 @@ class ClickhouseVirtualServerHandler(VirtualServerHandler):
         return results[0][0]
 
     def table_make_view(self, table_name, view_name, config):
-        query = self.sql_builder.table_make_view(table_name, view_name, config)
+        # Window order keys need column types for `range` frame emission.
+        schema = self.table_schema(table_name) if config.get("windows") else None
+        query = self.sql_builder.table_make_view(table_name, view_name, config, schema)
         run_query(self.db, query, execute=True)
 
-    def table_validate_expression(self, view_name, expression):
-        query = self.sql_builder.table_validate_expression(view_name, expression)
-        results = run_query(self.db, query)
-        return clickhouse_type_to_psp(results[0][1])
+    def table_describe(self, table_name, config):
+        schema = self.table_schema(table_name) if config.get("windows") else None
+        return sql_table_describe(
+            self.sql_builder, table_name, config, self._describe_query, schema
+        )
+
+    def _describe_query(self, query):
+        return {
+            row[0]: clickhouse_type_to_psp(row[1])
+            for row in run_query(self.db, query)
+            if not row[0].startswith("__")
+        }
 
     def view_delete(self, view_name):
         query = self.sql_builder.view_delete(view_name)

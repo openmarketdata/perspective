@@ -31,8 +31,12 @@
  * @module perspective-viewer
  */
 
+import "regular-layout";
+
 export { IPerspectiveViewerPlugin } from "./plugin";
 export { HTMLPerspectiveViewerPluginElement } from "./plugin";
+export { providers } from "./providers";
+export type { AgentProviderPreset } from "./providers";
 
 export {
     createNumberFormatter,
@@ -43,13 +47,24 @@ export {
 export type { NumberFormatConfig, DateFormatConfig } from "./column-format";
 
 export type * from "./extensions.ts";
-export { PerspectiveSelectDetail } from "./extensions.ts";
+export { PerspectiveSelectDetail } from "./select-detail.ts";
 export type * from "./ts-rs/ViewerConfigUpdate.d.ts";
 export type * from "./ts-rs/ViewerConfig.d.ts";
+export type * from "./ts-rs/WorkspaceConfigUpdate.d.ts";
+export type * from "./ts-rs/WorkspaceConfig.d.ts";
 export type * from "./ts-rs/Filter.d.ts";
 export type * from "./ts-rs/FilterTerm.d.ts";
 export type * from "./ts-rs/FilterReducer.d.ts";
 export type * from "./ts-rs/PluginStaticConfig.ts";
+export type * from "./ts-rs/ExportMethod.d.ts";
+export type * from "./ts-rs/PanelOptions.d.ts";
+export type * from "./ts-rs/SaveWorkspaceOptions.d.ts";
+export type * from "./ts-rs/ClientOptions.d.ts";
+export type * from "./ts-rs/ExportOptions.d.ts";
+export type * from "./ts-rs/GetTableOptions.d.ts";
+export type * from "./ts-rs/GetClientOptions.d.ts";
+export type * from "./ts-rs/GetViewOptions.d.ts";
+export type * from "./ts-rs/GetViewMode.d.ts";
 
 export { init_client } from "./bootstrap";
 import { init_client } from "./bootstrap";

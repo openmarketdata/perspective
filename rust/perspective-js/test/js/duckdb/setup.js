@@ -71,6 +71,96 @@ async function loadSuperstoreData(db) {
     });
 }
 
+// Column names AND values contain underscores, which DuckDB's `PIVOT` uses
+// as its own output-name separator. https://github.com/perspective-dev/perspective/issues/3187
+async function loadUnderscoreData(db) {
+    await db.query(`
+        CREATE TABLE underscore_test (
+            region_name VARCHAR,
+            sub_region VARCHAR,
+            account_number INTEGER,
+            total_sales DOUBLE
+        );
+    `);
+
+    await db.query(`
+        INSERT INTO underscore_test VALUES
+            ('east_coast', 'new_york', 1, 100.5),
+            ('east_coast', 'new_jersey', 2, 200.25),
+            ('west_coast', 'bay_area', 3, 300.75),
+            ('west_coast', 'la_metro', 4, 400.0);
+    `);
+}
+
+// Column names AND `split_by` values contain double quotes, which SQL
+// identifier quoting must escape. https://github.com/perspective-dev/perspective/issues/3237
+async function loadQuotedData(db) {
+    await db.query(`
+        CREATE TABLE quoted_test (
+            "we""ird" VARCHAR,
+            item_title VARCHAR,
+            amount DOUBLE
+        );
+    `);
+
+    await db.query(`
+        INSERT INTO quoted_test VALUES
+            ('g1', 'say "hi"', 1.0),
+            ('g1', 'plain', 2.0),
+            ('g1', 'a_b', 4.0),
+            ('g2', 'say "hi"', 8.0),
+            ('g2', 'plain', 16.0),
+            ('g2', 'a_b', 32.0);
+    `);
+}
+
+async function loadCoerceTypesData(db) {
+    await db.query(`CREATE TYPE mood AS ENUM ('happy', 'sad')`);
+    await db.query(`
+        CREATE TABLE coerce_types (
+            "tiny" TINYINT,
+            "small" SMALLINT,
+            "utiny" UTINYINT,
+            "usmall" USMALLINT,
+            "uint" UINTEGER,
+            "ubig" UBIGINT,
+            "big" BIGINT,
+            "float" REAL,
+            "decimal" DECIMAL(18, 3),
+            "time" TIME,
+            "timestamp" TIMESTAMP,
+            "date" DATE,
+            "enum" mood,
+            "string" VARCHAR
+        );
+    `);
+
+    await db.query(`
+        INSERT INTO coerce_types VALUES
+            (-1, -300, 255, 65535, 4294967295, 9007199254740992,
+             9007199254740992, 1.5, 1.234, TIME '01:01:01',
+             TIMESTAMP '2023-01-01 00:00:00', DATE '2023-01-01',
+             'happy', 'a'),
+            (1, 300, 0, 0, 0, 0, -9007199254740992, -1.5, -5.678,
+             TIME '00:00:01', TIMESTAMP '2023-01-02 00:00:00',
+             DATE '2023-01-02', 'sad', 'b');
+    `);
+}
+
+async function loadTemporalData(db) {
+    await db.query(`
+        CREATE TABLE temporal_test (ts TIMESTAMP, d DATE, x DOUBLE);
+    `);
+
+    await db.query(`
+        INSERT INTO temporal_test VALUES
+            (TIMESTAMP '2024-01-30 00:00:00', DATE '2024-01-30', 1.0),
+            (TIMESTAMP '2024-01-31 12:00:00', DATE '2024-01-31', 2.0),
+            (TIMESTAMP '2024-02-01 00:00:00', DATE '2024-02-01', 4.0),
+            (TIMESTAMP '2024-02-03 00:00:00', DATE '2024-02-03', 8.0);
+    `);
+}
+
 export function describeDuckDB(name, fn) {
     test.describe("DuckDB Virtual Server " + name, function () {
         let db;
@@ -83,6 +173,10 @@ export function describeDuckDB(name, fn) {
             );
             client = await perspective.worker(server);
             await loadSuperstoreData(db);
+            await loadUnderscoreData(db);
+            await loadQuotedData(db);
+            await loadCoerceTypesData(db);
+            await loadTemporalData(db);
         });
 
         fn(() => client);

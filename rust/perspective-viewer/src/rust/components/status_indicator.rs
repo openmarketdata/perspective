@@ -17,21 +17,20 @@ use yew::prelude::*;
 
 use crate::renderer::Renderer;
 use crate::session::{Session, SessionProps, TableLoadState};
+use crate::tasks::apply_and_render;
 use crate::utils::*;
 
 /// Value-prop version: no PubSub subscriptions, no reducer.
 /// The parent (`StatusBar`) re-renders this component whenever
-/// `session_props.error/has_table/stats` or `update_count` change (via
-/// root's `IncrementUpdateCount` / `DecrementUpdateCount` / `UpdateSession`
-/// messages).
+/// `session_props.error/has_table/has_table_cells` or `update_count` change
+/// (via root's `UpdateInFlight` / `UpdateSession` messages).
 #[derive(PartialEq, Properties)]
 pub struct StatusIndicatorProps {
     pub renderer: Renderer,
     pub session: Session,
-    /// Number of in-flight renders (>0 → "updating" spinner).
+
+    /// TODO(texodus): remove this
     pub update_count: u32,
-    /// Snapshot of session value props — read for `error`, `has_table`,
-    /// `stats` to derive the icon state.
     pub session_props: SessionProps,
 }
 
@@ -40,13 +39,7 @@ pub struct StatusIndicatorProps {
 /// reconnect callback when in an error state.
 #[function_component]
 pub fn StatusIndicator(props: &StatusIndicatorProps) -> Html {
-    let has_table_cells = props
-        .session_props
-        .stats
-        .as_ref()
-        .and_then(|s| s.num_table_cells)
-        .is_some();
-
+    let has_table_cells = props.session_props.has_table_cells;
     let state = if let Some(err) = &props.session_props.error {
         StatusIconState::Errored(
             err.message(),
@@ -58,6 +51,8 @@ pub fn StatusIndicator(props: &StatusIndicatorProps) -> Html {
         && matches!(props.session_props.has_table, Some(TableLoadState::Loading))
     {
         StatusIconState::Loading
+    } else if matches!(props.session_props.has_table, Some(TableLoadState::Pending)) {
+        StatusIconState::Pending
     } else if props.update_count > 0 {
         StatusIconState::Updating
     } else if has_table_cells {
@@ -72,6 +67,7 @@ pub fn StatusIndicator(props: &StatusIndicatorProps) -> Html {
         StatusIconState::Normal => "connected",
         StatusIconState::Updating => "updating",
         StatusIconState::Loading => "loading",
+        StatusIconState::Pending => "pending",
         StatusIconState::Uninitialized => "uninitialized",
     };
 
@@ -81,12 +77,7 @@ pub fn StatusIndicator(props: &StatusIndicatorProps) -> Html {
             match &state {
                 StatusIconState::Errored(..) => {
                     session.reconnect().await?;
-                    let cfg = ViewConfigUpdate::default();
-                    session.update_view_config(cfg)?;
-                    renderer.apply_pending_plugin()?;
-                    renderer
-                        .draw(session.validate().await?.create_view())
-                        .await?;
+                    apply_and_render(session, renderer, ViewConfigUpdate::default())?.await?;
                 },
                 StatusIconState::Normal => {
                     session.status_indicator_clicked.emit(());
@@ -119,6 +110,7 @@ pub fn StatusIndicator(props: &StatusIndicatorProps) -> Html {
 #[derive(Clone, Debug, PartialEq)]
 enum StatusIconState {
     Loading,
+    Pending,
     Updating,
     Errored(String, String, &'static str, bool),
     Normal,

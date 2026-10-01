@@ -16,7 +16,9 @@ import type { Client, Table, View } from "@perspective-dev/client";
 
 import type * as wasm_module_type from "@perspective-dev/viewer/dist/wasm/perspective-viewer.js";
 import { WebGLContextManager } from "../webgl/context-manager";
-import { ChartImplementation } from "../charts/chart";
+import { ContextPool } from "../webgl/context-pool";
+import { RENDER_CONTEXT_POOL_SIZE } from "../config";
+import { ChartImplementation, type PluginConfig } from "../charts/chart";
 import { ZoomController } from "../interaction/zoom-controller";
 import {
     applyPan,
@@ -34,10 +36,11 @@ import type {
     WorkerMsg,
 } from "../transport/protocol";
 import { viewToColumnDataMap } from "../data/view-reader";
+import { TILE_SOURCES, type TileSourceSpec } from "../map/tile-source";
 import { loadFontDeduped } from "./font-loader";
 import { dispatch } from "./dispatch";
 import { installSessionHost } from "./session-host";
-import { deferIfDraining } from "../render/scheduler";
+import { deferIfDraining, unregister } from "../render/scheduler";
 
 /**
  * Sentinel thrown inside the `with_typed_arrays` callback when a newer
@@ -76,6 +79,25 @@ async function resolveChartImpl(
     return await factory();
 }
 
+/**
+ * Renderer-scope shared context pool for pooled blit mode. Lazily
+ * created on first use so non-blit / non-pooled scopes never allocate
+ * one. One per renderer scope (the worker, or the main thread in
+ * in-process mode) — `WorkerRenderer`s in the same scope share its K
+ * contexts.
+ */
+let CONTEXT_POOL: ContextPool | null = null;
+
+function getContextPool(precompile: boolean): ContextPool {
+    if (!CONTEXT_POOL) {
+        CONTEXT_POOL = new ContextPool(RENDER_CONTEXT_POOL_SIZE, {
+            precompile,
+        });
+    }
+
+    return CONTEXT_POOL;
+}
+
 export class WorkerRenderer {
     chartImpl: ChartImplementation;
     glManager: WebGLContextManager;
@@ -85,6 +107,20 @@ export class WorkerRenderer {
     cssWidth: number;
     cssHeight: number;
     dpr: number;
+
+    /**
+     * Blit-mode compose surface: gridlines + GL frame + chrome are
+     * drawn here each `endFrame` and shipped as ONE `ImageBitmap`, so
+     * every layer rides the host's staged-present hold (see
+     * `InitMsg.gridlinesCanvas`). `null` in direct mode.
+     */
+    private _composeCanvas: OffscreenCanvas | null = null;
+    private _composeCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+    private _lastPlot: ImageBitmap | null = null;
+
+    private _frameSerial = 0;
+    private _overlayPresentQueued = false;
     client: Client;
     view: View;
 
@@ -131,35 +167,68 @@ export class WorkerRenderer {
 
         this.chartImpl = new ImplClass();
 
-        // Direct mode hands us the host's transferred `.webgl-canvas`.
-        // Blit mode omits it — the renderer owns its own offscreen
-        // surface and posts each completed frame back as an
-        // `ImageBitmap` via the `endFrame` callback wired below.
-        const glCanvas =
-            msg.glCanvas ??
-            new OffscreenCanvas(
-                Math.max(1, Math.round(msg.cssWidth * msg.dpr)),
-                Math.max(1, Math.round(msg.cssHeight * msg.dpr)),
+        // Registry write must precede the chart impl's first
+        // `setPluginConfig` — `pluginConfig.map_tile_provider` may
+        // name this runtime-registered source.
+        if (msg.tileSource) {
+            TILE_SOURCES.register(msg.tileSource);
+        }
+
+        // Three surfaces, by mode:
+        //  - direct: the host's transferred `.webgl-canvas` (1:1 with a
+        //    context, permanently).
+        //  - pooled blit: borrow one of K shared contexts so live-
+        //    context count stays bounded regardless of chart count.
+        //  - unpooled blit: a private offscreen surface per chart.
+        // Blit modes omit `msg.glCanvas`; the renderer ships each frame
+        // as an `ImageBitmap` via the `endFrame` callback wired below.
+        const pooled =
+            msg.renderMode === "blit" &&
+            !msg.glCanvas &&
+            RENDER_CONTEXT_POOL_SIZE > 0;
+
+        if (pooled) {
+            this.glManager = new WebGLContextManager(
+                getContextPool(msg.precompileShaders ?? false).acquire(),
             );
+        } else {
+            const glCanvas =
+                msg.glCanvas ??
+                new OffscreenCanvas(
+                    Math.max(1, Math.round(msg.cssWidth * msg.dpr)),
+                    Math.max(1, Math.round(msg.cssHeight * msg.dpr)),
+                );
 
-        this.glManager = new WebGLContextManager(glCanvas, {
-            precompile: msg.precompileShaders ?? false,
-        });
-
-        if (msg.renderMode === "blit") {
-            this.glManager.setFrameCallback((bitmap) => {
-                this.post({ kind: "frameBitmap", bitmap }, [bitmap]);
+            this.glManager = new WebGLContextManager(glCanvas, {
+                precompile: msg.precompileShaders ?? false,
             });
         }
 
-        this.gridlines = msg.gridlinesCanvas;
-        this.chrome = msg.chromeCanvas;
+        // Blit mode: the 2D layers are worker-local (the host omits
+        // them from the init message) and every shipped frame is the
+        // full composite — gridlines under the GL plot under chrome,
+        // the same stacking as the host's canvas elements and the
+        // `snapshotPng` composite. Direct mode draws into the host's
+        // transferred surfaces and ships nothing.
+        const w = Math.max(1, Math.round(msg.cssWidth * msg.dpr));
+        const h = Math.max(1, Math.round(msg.cssHeight * msg.dpr));
+        this.gridlines = msg.gridlinesCanvas ?? new OffscreenCanvas(w, h);
+        this.chrome = msg.chromeCanvas ?? new OffscreenCanvas(w, h);
+        if (msg.renderMode === "blit") {
+            this.glManager.setFrameCallback((bitmap) => {
+                this._frameSerial += 1;
+                const frame = this._composeFrame(bitmap);
+                this.post({ kind: "frameBitmap", bitmap: frame }, [frame]);
+            });
+            this.chartImpl.setOverlayPresenter?.(() => this._presentOverlay());
+        }
+
         this.cssWidth = msg.cssWidth;
         this.cssHeight = msg.cssHeight;
         this.dpr = msg.dpr;
 
-        this.chartImpl.setGridlineCanvas?.(msg.gridlinesCanvas);
-        this.chartImpl.setChromeCanvas?.(msg.chromeCanvas);
+        this.chartImpl.setGridlineCanvas?.(this.gridlines);
+        this.chartImpl.setChromeCanvas?.(this.chrome);
         this.chartImpl.setTheme?.(msg.themeVars);
 
         if (msg.defaultChartType) {
@@ -168,6 +237,9 @@ export class WorkerRenderer {
 
         this.chartImpl.setFacetConfig?.(msg.facetConfig);
         this.chartImpl.setPluginConfig?.(msg.pluginConfig);
+        if (msg.columnsConfig) {
+            this.chartImpl.setColumnsConfig?.(msg.columnsConfig);
+        }
 
         if (this.chartImpl.setZoomController) {
             this.zoomController = new ZoomController();
@@ -187,6 +259,20 @@ export class WorkerRenderer {
     setViewByName(name: string): void {
         this.view = this.client.__unsafe_open_view(name);
         this.chartImpl.setView?.(this.view);
+    }
+
+    /**
+     * Registry write precedes the config apply — `cfg` may name the
+     * spec riding alongside it (see `SetPluginConfigMsg.tileSource`),
+     * and a replaced template must be registered first so the map
+     * chart's rebind sees the new content-derived cache id.
+     */
+    setPluginConfig(cfg: PluginConfig, tileSource?: TileSourceSpec): void {
+        if (tileSource) {
+            TILE_SOURCES.register(tileSource);
+        }
+
+        this.chartImpl.setPluginConfig?.(cfg);
     }
 
     /**
@@ -219,6 +305,7 @@ export class WorkerRenderer {
      */
     async loadAndRender(msg: LoadAndRenderMsg): Promise<void> {
         const myGen = ++this._renderGen;
+        let error: string | undefined;
         try {
             const [numRows, schema, exprSchema, tableSchema] =
                 await Promise.all([
@@ -259,16 +346,23 @@ export class WorkerRenderer {
             try {
                 await viewToColumnDataMap(
                     this.view,
-                    async (cols) => {
+                    async (cols, deliveredRows) => {
                         if (this._renderGen !== myGen) {
                             throw new StaleGenerationError();
                         }
 
+                        // `totalRows` came from a SEPARATE `num_rows()`
+                        // round-trip; a fast-updating table with deletions
+                        // can shrink the view before the Arrow fetch, which
+                        // clamps its window silently. Iterating to the stale
+                        // count reads typed arrays out-of-bounds (`undefined`
+                        // values no validity bitmap covers) — clamp to what
+                        // was actually delivered.
                         await this.chartImpl.uploadAndRender(
                             this.glManager,
                             cols,
                             0,
-                            totalRows,
+                            Math.min(totalRows, deliveredRows),
                         );
                     },
                     { end_row: totalRows, float32: msg.options.float32 },
@@ -281,14 +375,33 @@ export class WorkerRenderer {
         } catch (err) {
             if ((err + "").indexOf("View not found") === -1) {
                 console.error("loadAndRender failed", err);
+                error = String(err);
             }
         } finally {
-            this.post({ kind: "loadAndRenderAck", msgId: msg.msgId });
+            this.post({ kind: "loadAndRenderAck", msgId: msg.msgId, error });
         }
     }
 
     redraw(): void {
         this.chartImpl.requestRender(this.glManager);
+    }
+
+    /**
+     * `redraw`, acked to the host AFTER the frame's present completes —
+     * the reply backing the viewer's presize contract (`ResizeAckMsg`):
+     * `plugin.resize()` must not resolve until the resized frame is
+     * actually on screen. A resize landing mid-present defers its
+     * canvas mutation (`deferIfDraining`), but the redraw's own frame
+     * applies pending dimensions in `beginFrame`, so the present this
+     * awaits IS at the new size. Always acks — a failed present or a
+     * torn-down chart resolves the host's await rather than stranding
+     * it (completion, not success, is the contract).
+     */
+    redrawAck(msgId: number): void {
+        this.chartImpl
+            .requestRender(this.glManager)
+            .catch(() => {})
+            .finally(() => this.post({ kind: "resizeAck", msgId }));
     }
 
     resize(cssWidth: number, cssHeight: number, dpr: number): void {
@@ -434,7 +547,59 @@ export class WorkerRenderer {
         return { controller: this.zoomController, layout };
     }
 
+    /**
+     * Legend-first interaction routing. The chart's `LegendController`
+     * sees every forwarded event BEFORE the zoom / tooltip paths, so
+     * legend gestures (scroll, width drag, floating move / resize)
+     * structurally preempt plot pan / zoom / hover — a wheel over the
+     * legend can never zoom the plot under it, and a floating-panel
+     * drag can never start a pan.
+     */
+    private _legendInteraction(event: InteractionEvent): boolean {
+        const chart = this.chartImpl as any;
+        const legend = chart?._legend;
+        const cfg = chart?._pluginConfig;
+        if (!legend || !cfg) {
+            return false;
+        }
+
+        return legend.handleEvent(event, {
+            cfg,
+            cssWidth: this.cssWidth,
+            cssHeight: this.cssHeight,
+            legendRects: chart._legendRects ?? [],
+            repaint: (relayout: boolean) => {
+                if (!relayout && typeof chart.repaintChrome === "function") {
+                    chart.repaintChrome();
+                } else {
+                    this.chartImpl.requestRender(this.glManager);
+                }
+            },
+            postDelta: (fields: Record<string, string | number | boolean>) =>
+                this.post({ kind: "pluginConfigDelta", fields }),
+            setCursor: (cursor: string) => chart._hostSink?.setCursor?.(cursor),
+            dispatchLeave: () => this._tooltip()?.dispatchLeave(),
+        });
+    }
+
     onInteraction(event: InteractionEvent): void {
+        try {
+            this._routeInteraction(event);
+        } catch (err) {
+            this._dragTarget = null;
+            (this.chartImpl as any)?._legend?.cancelGesture?.();
+            console.error("interaction dispatch failed", err);
+        }
+    }
+
+    private _routeInteraction(event: InteractionEvent): void {
+        const plotDragging =
+            this._dragTarget !== null &&
+            (event.type === "pointermove" || event.type === "pointerup");
+        if (!plotDragging && this._legendInteraction(event)) {
+            return;
+        }
+
         switch (event.type) {
             case "wheel": {
                 const target = this._resolveTarget(event.mx, event.my);
@@ -525,16 +690,103 @@ export class WorkerRenderer {
     }
 
     /**
+     * Blit-mode frame composite: draw the gridlines (bottom), the GL
+     * plot bitmap (middle) and the chrome/axes (top) into the compose
+     * surface and transfer the result — the single `ImageBitmap` the
+     * host blits, and the unit the staged-present hold stages. Runs in
+     * `endFrame`, which the scheduler orders after `render2D`'s 2D
+     * flush, so both layers hold this frame's content.
+     *
+     * A layer whose buffer differs from the plot's dimensions is
+     * skipped rather than scaled: its content is a stale-sized frame
+     * mid-resize (the 2D draws re-size their canvas to `css × dpr` on
+     * the next flush), and scaling it would re-introduce exactly the
+     * warp this composite exists to prevent.
+     */
+    private _composeFrame(plot: ImageBitmap): ImageBitmap {
+        const w = plot.width;
+        const h = plot.height;
+        if (!this._composeCanvas) {
+            this._composeCanvas = new OffscreenCanvas(w, h);
+            this._composeCtx = this._composeCanvas.getContext("2d");
+        }
+
+        const canvas = this._composeCanvas;
+        const ctx = this._composeCtx;
+        if (!ctx) {
+            return plot;
+        }
+
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        } else {
+            ctx.clearRect(0, 0, w, h);
+        }
+
+        if (this.gridlines.width === w && this.gridlines.height === h) {
+            ctx.drawImage(this.gridlines, 0, 0);
+        }
+
+        ctx.drawImage(plot, 0, 0);
+        if (this._lastPlot !== plot) {
+            this._lastPlot?.close();
+            this._lastPlot = plot;
+        }
+
+        if (this.chrome.width === w && this.chrome.height === h) {
+            ctx.drawImage(this.chrome, 0, 0);
+        }
+
+        return canvas.transferToImageBitmap();
+    }
+
+    private _presentOverlay(): void {
+        if (this._overlayPresentQueued) {
+            return;
+        }
+
+        this._overlayPresentQueued = true;
+        const mark = this._frameSerial;
+        queueMicrotask(() => {
+            this._overlayPresentQueued = false;
+            const plot = this._lastPlot;
+            if (this._frameSerial !== mark || !plot) {
+                return;
+            }
+
+            const w = Math.max(1, Math.round(this.cssWidth * this.dpr));
+            const h = Math.max(1, Math.round(this.cssHeight * this.dpr));
+            if (plot.width !== w || plot.height !== h) {
+                return;
+            }
+
+            const frame = this._composeFrame(plot);
+            if (frame === plot) {
+                return;
+            }
+
+            this.post({ kind: "frameBitmap", bitmap: frame }, [frame]);
+        });
+    }
+
+    /**
      * Composite the three layers into a single PNG `Blob`.
      */
     async snapshotPng(): Promise<Blob> {
-        // Snapshot bypasses the scheduler's drain, so it must
-        // mirror Phase 1's "apply pending resize before paint"
-        // step itself — otherwise a snapshot taken after a resize
-        // message but before the next drain would render at the
-        // previous dimensions.
-        this.glManager.applyPendingResize();
-        this.chartImpl._fullRender(this.glManager);
+        // Snapshot bypasses the scheduler's drain, so it must mirror
+        // the per-frame prep itself — apply any pending resize, and in
+        // pooled blit mode size the shared canvas to this chart and
+        // reset shared GL state — otherwise a snapshot taken after a
+        // resize message but before the next drain (or after a co-tenant
+        // chart left the shared canvas at its own size) would render at
+        // the wrong dimensions.
+        this.glManager.beginFrame();
+        // `renderFrameSync` (not `_fullRender`) so the gridline + chrome
+        // 2D canvases are actually painted here — the scheduler normally
+        // defers those to a post-fence flush, but the snapshot path
+        // bypasses the scheduler and composites the 2D layers below.
+        this.chartImpl.renderFrameSync(this.glManager);
         const gl = this.glManager.gl;
         const glCanvas = gl.canvas as OffscreenCanvas;
         const w = glCanvas.width;
@@ -574,6 +826,13 @@ export class WorkerRenderer {
     }
 
     destroy(): void {
+        // Drop any frame this manager still has queued in the
+        // module-level scheduler *before* losing its GL context, so a
+        // next-RAF `drain()` can't paint/present against a dead
+        // context (the "scheduler: present failed" path).
+        unregister(this.glManager);
+        this._lastPlot?.close();
+        this._lastPlot = null;
         this.chartImpl.destroy();
         this.glManager.destroy();
     }

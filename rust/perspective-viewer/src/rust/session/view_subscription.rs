@@ -10,10 +10,11 @@
 // ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use perspective_client::config::*;
+use perspective_client::proto::ViewDimensionsResp;
 use perspective_client::{OnUpdateOptions, View};
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
@@ -36,10 +37,15 @@ pub struct ViewStats {
 struct ViewSubscriptionData {
     view: View,
     config: Rc<ViewConfig>,
+    build_config: Rc<ViewConfig>,
     callback_id: Rc<Cell<u32>>,
     on_stats: Callback<ViewStats>,
     on_update: Option<Callback<()>>,
     is_deleted: Rc<Cell<bool>>,
+
+    /// The bound `View`'s latest known dimensions, written before
+    /// `on_update`/`on_stats` fire.
+    dimensions: Rc<RefCell<Option<ViewDimensionsResp>>>,
 }
 
 /// A subscription to `on_update()` events from a Perspective `View()`, managing
@@ -51,22 +57,21 @@ pub struct ViewSubscription {
 impl ViewSubscriptionData {
     /// Main handler when underlying `View()` calls `on_update()`.
     async fn on_view_update(self) -> ApiResult<JsValue> {
+        self.clone().update_view_stats().await?;
         if let Some(on_update) = &self.on_update {
             on_update.emit(());
         };
 
-        self.clone().update_view_stats().await?;
         Ok(JsValue::UNDEFINED)
     }
 
-    /// TODO Use serde to serialize the full view config, instead of calculating
-    /// `is_aggregated` here.
     async fn update_view_stats(self) -> ApiResult<JsValue> {
         let dimensions = self.view.dimensions().await?;
-        let num_rows = dimensions.num_table_rows as u32;
-        let num_cols = dimensions.num_table_columns as u32;
-        let virtual_rows = dimensions.num_view_rows as u32;
-        let virtual_cols = dimensions.num_view_columns as u32;
+        let num_rows = dimensions.num_table_rows;
+        let num_cols = dimensions.num_table_columns;
+        let virtual_rows = dimensions.num_view_rows;
+        let virtual_cols = dimensions.num_view_columns;
+        *self.dimensions.borrow_mut() = Some(dimensions);
         let stats = ViewStats {
             num_table_cells: Some((num_rows, num_cols)),
             num_view_cells: Some((virtual_rows, virtual_cols)),
@@ -80,13 +85,16 @@ impl ViewSubscriptionData {
     }
 
     async fn internal_delete(&self) -> ApiResult<()> {
+        if self.is_deleted.replace(true) {
+            return Ok(());
+        }
+
         let view = &self.view;
         if self.on_update.is_some() {
             view.remove_update(self.callback_id.get()).await?;
         }
 
         view.delete().await?;
-        self.is_deleted.set(true);
         Ok(())
     }
 }
@@ -104,17 +112,20 @@ impl ViewSubscription {
     ///   `View.on_update()`.
     pub async fn new(
         view: perspective_client::View,
-        config: ViewConfig,
+        config: Rc<ViewConfig>,
+        build_config: Rc<ViewConfig>,
         on_stats: Callback<ViewStats>,
         on_update: Option<Callback<()>>,
     ) -> Result<Self, ApiError> {
         let data = ViewSubscriptionData {
             view,
-            config: config.into(),
+            config,
+            build_config,
             on_stats,
             callback_id: Rc::default(),
             on_update,
             is_deleted: Rc::default(),
+            dimensions: Rc::default(),
         };
 
         if data.on_update.is_some() {
@@ -142,10 +153,13 @@ impl ViewSubscription {
     }
 
     /// It is possible to re-use a `ViewSubscription` without a costly
-    /// resubscribe under certain conditions, which still need an updated
-    /// `ViewConfig`.
-    pub fn update_view_config(&mut self, config: Rc<ViewConfig>) {
-        self.data.config = config
+    /// resubscribe when the new config is engine-equivalent to the one the
+    /// bound `View` was built from (placeholder-only differences); the
+    /// snapshots still need updating so reads stay consistent with the run
+    /// that adopted them.
+    pub fn set_configs(&mut self, config: Rc<ViewConfig>, build_config: Rc<ViewConfig>) {
+        self.data.config = config;
+        self.data.build_config = build_config;
     }
 
     /// Getter for the underlying `View()`.
@@ -153,14 +167,28 @@ impl ViewSubscription {
         &self.data.view
     }
 
-    /// Snapshot of the [`ViewConfig`] the bound `View` was constructed
-    /// from (or its operationally-equivalent successor on the
-    /// [`ValidSession::create_view`] fast path). This is the
-    /// [`ViewConfig`] consistent with the data the active plugin is
-    /// currently rendering — not the live session config, which may
-    /// have been mutated synchronously ahead of the next queued draw.
+    /// The bound `View`'s latest known dimensions (`None` until the first
+    /// fetch resolves).
+    pub fn dimensions(&self) -> Option<ViewDimensionsResp> {
+        self.data.dimensions.borrow().clone()
+    }
+
+    /// User-facing snapshot of the [`ViewConfig`] the bound `View` was
+    /// constructed from (the persisted config at build time — global-filter
+    /// overlay excluded). This is the [`ViewConfig`] consistent with the
+    /// data the active plugin is currently rendering — not the live session
+    /// config, which may have been mutated synchronously ahead of the next
+    /// queued run.
     pub fn get_view_config(&self) -> Rc<ViewConfig> {
         self.data.config.clone()
+    }
+
+    /// The EFFECTIVE [`ViewConfig`] the bound `View` was built from
+    /// (persisted config + global-filter overlay at build time). This is
+    /// the value `Session::bind_view` compares a run's snapshot against to
+    /// decide SKIP / REUSE / REBUILD.
+    pub fn build_config(&self) -> Rc<ViewConfig> {
+        self.data.build_config.clone()
     }
 
     /// Delete this `View`. Neglecting to call this method before a

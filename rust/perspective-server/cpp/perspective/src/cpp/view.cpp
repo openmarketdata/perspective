@@ -73,6 +73,8 @@ View<CTX_T>::View(
         _find_hidden_sort(column_sort);
     }
 
+    m_split_rollup = m_view_config->is_split_rollup() && sides() == 2;
+
     // configure data window for `get_data` and `row_delta`
     // Column-only views skip the grand total row (offset=1), but
     // total_only mode needs to return exactly that row.
@@ -169,7 +171,8 @@ View<t_ctx2>::num_columns() const {
 
         auto count = 0;
         for (t_uindex i = 0; i < col_length; ++i) {
-            if (m_ctx->unity_get_column_path(i + 1).size() != depth) {
+            if (!m_split_rollup
+                && m_ctx->unity_get_column_path(i + 1).size() != depth) {
                 continue;
             }
 
@@ -211,7 +214,8 @@ View<CTX_T>::column_names(bool skip, std::int32_t depth) const {
         }
 
         std::vector<t_tscalar> col_path = m_ctx->unity_get_column_path(key + 1);
-        if (skip && col_path.size() < static_cast<unsigned int>(depth)) {
+        if (skip && !m_split_rollup
+            && col_path.size() < static_cast<unsigned int>(depth)) {
             continue;
         }
 
@@ -279,60 +283,31 @@ View<CTX_T>::column_names_range(
         aggregate_names[i] = aggs[i].name();
     }
 
-    auto col_count = m_ctx->unity_get_column_count();
-    // start_col++;
-    // end_col++;
-
-    t_uindex key = 0;
-    while (key < start_col && key < col_count) {
-        key++;
+    t_uindex visible = 0;
+    for (t_uindex key = 0, max = m_ctx->unity_get_column_count();
+         key != max && visible < end_col;
+         ++key) {
         const std::string& name = aggregate_names[key % aggregate_names.size()];
+
         if (name == "psp_okey") {
-            start_col += 1;
-            end_col += 1;
             continue;
         }
 
         std::vector<t_tscalar> col_path = m_ctx->unity_get_column_path(key + 1);
-        if (skip && col_path.size() < static_cast<unsigned int>(depth)) {
-            start_col += 1;
-            end_col += 1;
+        if (skip && !m_split_rollup
+            && col_path.size() < static_cast<unsigned int>(depth)) {
             continue;
         }
 
         if (!m_hidden_sort.empty()) {
             if (std::find(m_hidden_sort.begin(), m_hidden_sort.end(), name)
                 != m_hidden_sort.end()) {
-                start_col += 1;
-                end_col += 1;
                 continue;
             }
         }
-    }
 
-    for (t_uindex max = std::min(end_col, col_count); key <= max; ++key) {
-        const std::string& name = aggregate_names[key % aggregate_names.size()];
-
-        if (name == "psp_okey") {
-            end_col += 1;
-            max = std::min(end_col, col_count);
+        if (visible++ < start_col) {
             continue;
-        }
-
-        std::vector<t_tscalar> col_path = m_ctx->unity_get_column_path(key + 1);
-        if (skip && col_path.size() < static_cast<unsigned int>(depth)) {
-            end_col += 1;
-            max = std::min(end_col, col_count);
-            continue;
-        }
-
-        if (!m_hidden_sort.empty()) {
-            if (std::find(m_hidden_sort.begin(), m_hidden_sort.end(), name)
-                != m_hidden_sort.end()) {
-                end_col += 1;
-                max = std::min(end_col, col_count);
-                continue;
-            }
         }
 
         std::vector<t_tscalar> new_path;
@@ -464,87 +439,88 @@ View<CTX_T>::column_paths_string() const {
     return out;
 }
 
+static std::string
+map_aggregate_type(t_aggtype agg, const std::string& typestring) {
+    switch (agg) {
+        case AGGTYPE_DISTINCT_COUNT:
+        case AGGTYPE_COUNT: {
+            return "integer";
+        } break;
+        case AGGTYPE_MEAN:
+        case AGGTYPE_MEAN_BY_COUNT:
+        case AGGTYPE_WEIGHTED_MEAN:
+        case AGGTYPE_PCT_SUM_PARENT:
+        case AGGTYPE_PCT_SUM_GRAND_TOTAL:
+        case AGGTYPE_VARIANCE:
+        case AGGTYPE_STANDARD_DEVIATION: {
+            return "float";
+        } break;
+        default: {
+            return typestring;
+        } break;
+    }
+}
+
+std::map<std::string, std::string>
+describe_view_schema(
+    const t_view_config& config, const t_schema& schema, bool pivoted
+) {
+    std::map<std::string, std::string> out;
+    const auto type_of = [&schema](const std::string& name) {
+        return dtype_to_str(
+            schema.has_column(name) ? schema.get_dtype(name) : DTYPE_NONE
+        );
+    };
+
+    if (!pivoted) {
+        for (const auto& name : config.get_columns()) {
+            if (name == "psp_okey") {
+                continue;
+            }
+
+            out[name] = type_of(name);
+        }
+
+        return out;
+    }
+
+    const bool map_types =
+        (!config.get_row_pivots().empty() || config.is_total_only())
+        && (!config.is_column_only() || config.is_total_only());
+
+    for (const t_aggspec& agg : config.get_aggspecs()) {
+        const std::string& name = agg.name();
+        if (name == "psp_okey") {
+            continue;
+        }
+
+        std::string type_str = type_of(name);
+        if (map_types) {
+            type_str = map_aggregate_type(agg.agg(), type_str);
+        }
+
+        out[name] = type_str;
+    }
+
+    return out;
+}
+
 template <typename CTX_T>
 std::map<std::string, std::string>
 View<CTX_T>::schema() const {
-    // TODO: should revert to m_table
-    auto schema = m_ctx->get_schema();
-    auto _types = schema.types();
-    auto names = schema.columns();
-
-    std::map<std::string, t_dtype> types;
-    std::map<std::string, std::string> new_schema;
-
-    for (std::size_t i = 0, max = names.size(); i != max; ++i) {
-        types[names[i]] = _types[i];
-    }
-
-    auto col_names = column_names(false);
-    for (const std::vector<t_tscalar>& name : col_names) {
-        // Pull out the main aggregate column
-        std::string agg_name = name.back().to_string();
-        std::string type_string = dtype_to_str(types[agg_name]);
-        new_schema[agg_name] = type_string;
-
-        if ((!m_row_pivots.empty() || m_view_config->is_total_only()) && (!is_column_only() || m_view_config->is_total_only())) {
-            new_schema[agg_name] =
-                _map_aggregate_types(agg_name, new_schema[agg_name]);
-        }
-    }
-
-    return new_schema;
+    return describe_view_schema(*m_view_config, m_ctx->get_schema(), true);
 }
 
 template <>
 std::map<std::string, std::string>
 View<t_ctxunit>::schema() const {
-    t_schema schema = m_ctx->get_schema();
-    std::vector<t_dtype> _types = schema.types();
-    std::vector<std::string> names = schema.columns();
-
-    std::map<std::string, t_dtype> types;
-    for (std::size_t i = 0, max = names.size(); i != max; ++i) {
-        types[names[i]] = _types[i];
-    }
-
-    std::vector<std::vector<t_tscalar>> cols = column_names(false);
-    std::map<std::string, std::string> new_schema;
-
-    for (auto& col : cols) {
-        std::string name = col.back().to_string();
-        if (name == "psp_okey") {
-            continue;
-        }
-        new_schema[name] = dtype_to_str(types[name]);
-    }
-
-    return new_schema;
+    return describe_view_schema(*m_view_config, m_ctx->get_schema(), false);
 }
 
 template <>
 std::map<std::string, std::string>
 View<t_ctx0>::schema() const {
-    const t_schema& schema = m_ctx->get_schema();
-    const std::vector<t_dtype>& _types = schema.types();
-    const std::vector<std::string>& names = schema.columns();
-
-    std::map<std::string, t_dtype> types;
-    for (std::size_t i = 0, max = names.size(); i != max; ++i) {
-        types[names[i]] = _types[i];
-    }
-
-    std::vector<std::vector<t_tscalar>> cols = column_names(false);
-    std::map<std::string, std::string> new_schema;
-
-    for (auto& col : cols) {
-        std::string name = col.back().to_string();
-        if (name == "psp_okey") {
-            continue;
-        }
-        new_schema[name] = dtype_to_str(types[name]);
-    }
-
-    return new_schema;
+    return describe_view_schema(*m_view_config, m_ctx->get_schema(), false);
 }
 
 template <typename CTX_T>
@@ -724,7 +700,7 @@ View<t_ctx2>::get_data(
             column_indices.push_back(0);
             for (t_uindex i = 0; i < col_length; ++i) {
                 auto col_path = m_ctx->unity_get_column_path(i + 1);
-                if (col_path.size() != depth) {
+                if (!m_split_rollup && col_path.size() != depth) {
                     continue;
                 }
 
@@ -773,6 +749,10 @@ View<t_ctx2>::get_data(
         std::vector<t_tscalar> slice_with_headers =
             m_ctx->get_data(start_row, end_row, start_col_index, end_col_index);
 
+        if (column_indices.empty()) {
+            slice_with_headers.clear();
+        }
+
         auto iter = slice_with_headers.begin();
         while (iter != slice_with_headers.end()) {
             t_uindex prev = column_indices.front();
@@ -817,7 +797,7 @@ View<CTX_T>::to_arrow(
     std::int32_t start_col,
     std::int32_t end_col,
     bool emit_group_by,
-    bool compress,
+    t_arrow_compression compression,
     bool emit_legacy_row_path_names
 ) const {
     PSP_GIL_UNLOCK();
@@ -825,7 +805,9 @@ View<CTX_T>::to_arrow(
 
     std::shared_ptr<t_data_slice<CTX_T>> data_slice =
         get_data(start_row, end_row, start_col, end_col);
-    return data_slice_to_arrow(data_slice, emit_group_by, compress, emit_legacy_row_path_names);
+    return data_slice_to_arrow(
+        data_slice, emit_group_by, compression, emit_legacy_row_path_names
+    );
 };
 
 template <>
@@ -1437,7 +1419,7 @@ std::shared_ptr<std::string>
 View<CTX_T>::data_slice_to_arrow(
     std::shared_ptr<t_data_slice<CTX_T>> data_slice,
     bool emit_group_by,
-    bool compress,
+    t_arrow_compression compression,
     bool emit_legacy_row_path_names
 ) const {
     std::pair<
@@ -1459,9 +1441,18 @@ View<CTX_T>::data_slice_to_arrow(
     buffer = *allocated;
     arrow::io::BufferOutputStream sink(buffer);
     auto options = arrow::ipc::IpcWriteOptions::Defaults();
-    if (compress) {
-        auto codec = arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
-        options.codec = std::move(codec).ValueUnsafe();
+    switch (compression) {
+        case t_arrow_compression::LZ4: {
+            auto codec =
+                arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
+            options.codec = std::move(codec).ValueUnsafe();
+        } break;
+        case t_arrow_compression::ZSTD: {
+            auto codec = arrow::util::Codec::Create(arrow::Compression::ZSTD);
+            options.codec = std::move(codec).ValueUnsafe();
+        } break;
+        case t_arrow_compression::NONE:
+            break;
     }
 
 #ifdef PSP_PARALLEL_FOR
@@ -1767,27 +1758,9 @@ std::string
 View<CTX_T>::_map_aggregate_types(
     const std::string& name, const std::string& typestring
 ) const {
-
     for (const t_aggspec& agg : m_aggregates) {
         if (agg.name() == name) {
-            switch (agg.agg()) {
-                case AGGTYPE_DISTINCT_COUNT:
-                case AGGTYPE_COUNT: {
-                    return "integer";
-                } break;
-                case AGGTYPE_MEAN:
-                case AGGTYPE_MEAN_BY_COUNT:
-                case AGGTYPE_WEIGHTED_MEAN:
-                case AGGTYPE_PCT_SUM_PARENT:
-                case AGGTYPE_PCT_SUM_GRAND_TOTAL:
-                case AGGTYPE_VARIANCE:
-                case AGGTYPE_STANDARD_DEVIATION: {
-                    return "float";
-                } break;
-                default: {
-                    return typestring;
-                } break;
-            }
+            return map_aggregate_type(agg.agg(), typestring);
         }
     }
 
@@ -1813,21 +1786,29 @@ write_scalar(
         case DTYPE_BOOL:
             writer.Bool(scalar.get<bool>());
             break;
-        case DTYPE_UINT8:
         case DTYPE_INT8:
-            writer.Int(scalar.get<int8_t>());
+            writer.Int(scalar.get<std::int8_t>());
+            break;
+        case DTYPE_INT16:
+            writer.Int(scalar.get<std::int16_t>());
+            break;
+        case DTYPE_INT32:
+            writer.Int(scalar.get<std::int32_t>());
+            break;
+        case DTYPE_INT64:
+            writer.Int64(scalar.get<std::int64_t>());
+            break;
+        case DTYPE_UINT8:
+            writer.Uint(scalar.get<std::uint8_t>());
             break;
         case DTYPE_UINT16:
-        case DTYPE_INT16:
-            writer.Int(scalar.get<int16_t>());
+            writer.Uint(scalar.get<std::uint16_t>());
             break;
         case DTYPE_UINT32:
-        case DTYPE_INT32:
-            writer.Int(scalar.get<int32_t>());
+            writer.Uint(scalar.get<std::uint32_t>());
             break;
         case DTYPE_UINT64:
-        case DTYPE_INT64:
-            writer.Int64(scalar.get<int64_t>());
+            writer.Uint64(scalar.get<std::uint64_t>());
             break;
         case DTYPE_FLOAT32:
             if (scalar.is_nan()) {
@@ -1858,10 +1839,7 @@ write_scalar(
             if (is_formatted) {
                 writer.String(scalar.to_string().c_str());
             } else {
-                t_date date_val = scalar.get<t_date>();
-                tm t = date_val.get_tm();
-                time_t epoch_delta = mktime(&t);
-                writer.Int64(epoch_delta * 1000);
+                writer.Int64(scalar.get<t_date>().as_epoch_ms());
             }
             break;
         }
@@ -1988,6 +1966,7 @@ View<T>::to_rows(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2023,10 +2002,11 @@ View<T>::to_rows(
                 std::pair<t_uindex, t_uindex> pair{r, 0};
                 std::vector<std::pair<t_uindex, t_uindex>> vec{pair};
                 const auto keys = m_ctx->get_pkeys(vec);
-                const t_tscalar& scalar = keys[0];
                 writer.Key("__ID__");
                 writer.StartArray();
-                write_scalar(scalar, is_formatted, writer);
+                if (!keys.empty()) {
+                    write_scalar(keys[0], is_formatted, writer);
+                }
                 writer.EndArray();
             }
 
@@ -2076,6 +2056,7 @@ View<t_ctx1>::to_rows(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2173,6 +2154,7 @@ View<t_ctx2>::to_rows(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2321,6 +2303,7 @@ View<T>::to_ndjson(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     if (start_row == end_row || (start_col == end_col && !has_row_path)) {
         return "";
@@ -2357,10 +2340,11 @@ View<T>::to_ndjson(
                 std::pair<t_uindex, t_uindex> pair{r, 0};
                 std::vector<std::pair<t_uindex, t_uindex>> vec{pair};
                 const auto keys = m_ctx->get_pkeys(vec);
-                const t_tscalar& scalar = keys[0];
                 writer.Key("__ID__");
                 writer.StartArray();
-                write_scalar(scalar, is_formatted, writer);
+                if (!keys.empty()) {
+                    write_scalar(keys[0], is_formatted, writer);
+                }
                 writer.EndArray();
             }
 
@@ -2410,6 +2394,7 @@ View<t_ctx1>::to_ndjson(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     if (start_row == end_row || (start_col == end_col && !has_row_path)) {
         return "";
@@ -2511,6 +2496,7 @@ View<t_ctx2>::to_ndjson(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     if (start_row == end_row || (start_col == end_col && !has_row_path)) {
         return "";
@@ -2611,6 +2597,7 @@ View<T>::to_columns(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const std::vector<std::vector<t_tscalar>>& col_names =
         slice->get_column_names();
 
@@ -2643,9 +2630,10 @@ View<T>::to_columns(
             std::pair<t_uindex, t_uindex> pair{x, 0};
             std::vector<std::pair<t_uindex, t_uindex>> vec{pair};
             const auto keys = m_ctx->get_pkeys(vec);
-            const t_tscalar& scalar = keys[0];
             writer.StartArray();
-            write_scalar(scalar, is_formatted, writer);
+            if (!keys.empty()) {
+                write_scalar(keys[0], is_formatted, writer);
+            }
             writer.EndArray();
         }
 
@@ -2677,6 +2665,7 @@ View<t_ctx1>::to_columns(
     PSP_READ_LOCK(*get_lock());
 
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2702,7 +2691,7 @@ View<t_ctx1>::to_columns(
     // Hidden columns are always at the end of the column names
     // list, and we need to skip them from the output.
     for (auto c = start_col + 1; c < end_col; ++c) {
-        if ((c - 1) > columns_length - hidden) {
+        if ((c - 1) >= columns_length) {
             continue;
         }
         write_column(
@@ -2747,6 +2736,7 @@ View<t_ctx2>::to_columns(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     const auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);

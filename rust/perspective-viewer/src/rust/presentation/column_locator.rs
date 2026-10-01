@@ -12,6 +12,8 @@
 
 use std::fmt::Display;
 
+use crate::ui::TabItem;
+
 /// Locates a view column.
 /// Table columns are those defined on the table, but their types will reflect
 /// the view type, not the table type.
@@ -19,6 +21,7 @@ use std::fmt::Display;
 pub enum ColumnLocator {
     Table(String),
     Expression(String),
+    Window(String),
     NewExpression,
 }
 
@@ -28,7 +31,7 @@ impl ColumnLocator {
     /// function will return None.
     pub fn name(&self) -> Option<&String> {
         match self {
-            Self::Table(s) | Self::Expression(s) => Some(s),
+            Self::Table(s) | Self::Expression(s) | Self::Window(s) => Some(s),
             Self::NewExpression => None,
         }
     }
@@ -50,6 +53,36 @@ impl ColumnLocator {
     pub fn is_new_expr(&self) -> bool {
         matches!(self, ColumnLocator::NewExpression)
     }
+
+    #[inline(always)]
+    pub fn is_saved_window(&self) -> bool {
+        matches!(self, ColumnLocator::Window(_))
+    }
+
+    #[inline(always)]
+    pub fn is_window_editable(&self) -> bool {
+        matches!(
+            self,
+            ColumnLocator::Window(_) | ColumnLocator::NewExpression
+        )
+    }
+}
+
+/// What the column-settings drawer is opened on, as held in presentation
+/// state: a column by name, or the not-yet-saved expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColumnSettingsTarget {
+    Column(String),
+    NewExpression,
+}
+
+impl ColumnSettingsTarget {
+    pub fn name(&self) -> Option<&String> {
+        match self {
+            Self::Column(name) => Some(name),
+            Self::NewExpression => None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -57,6 +90,7 @@ impl ColumnLocator {
 pub enum ColumnSettingsTab {
     #[default]
     Attributes,
+    Window,
     Style,
 }
 
@@ -68,23 +102,14 @@ impl Display for ColumnSettingsTab {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct OpenColumnSettings {
-    pub locator: Option<ColumnLocator>,
+    pub target: Option<ColumnSettingsTarget>,
     pub tab: Option<ColumnSettingsTab>,
 }
 
 impl OpenColumnSettings {
     pub fn name(&self) -> Option<String> {
-        self.locator
-            .as_ref()
-            .and_then(|l| l.name())
-            .map(|s| s.to_owned())
+        self.target.as_ref().and_then(|t| t.name()).cloned()
     }
 }
 
-pub trait ColumnTab: PartialEq + Display + Clone + Default + 'static {}
-
-impl ColumnTab for String {}
-
-impl ColumnTab for &'static str {}
-
-impl ColumnTab for ColumnSettingsTab {}
+impl TabItem for ColumnSettingsTab {}

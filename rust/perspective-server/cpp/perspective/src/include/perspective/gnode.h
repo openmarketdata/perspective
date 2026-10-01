@@ -138,6 +138,17 @@ public:
     bool process(t_uindex port_id);
 
     /**
+     * @brief The primary keys of rows that existed before the most recent
+     * `process` and were removed by it, as a one-column `psp_pkey`
+     * `t_data_table`, or `nullptr` when that step removed nothing or removes
+     * are not enabled.
+     */
+    std::shared_ptr<t_data_table> get_removed_pkeys() const;
+
+    void set_removes_enabled(bool enabled);
+    bool get_removes_enabled() const;
+
+    /**
      * @brief Create a new input port, store it in `m_input_ports`, and
      * return the integer ID that references the new port.
      *
@@ -361,22 +372,17 @@ protected:
      * Expression Column Operations
      */
 
-    /**
-     * @brief Compute all expressions on each registered context using the
-     * flattened table. This method is called on the first update applied
-     * on an empty gstate master table.
-     */
     void
     _compute_expressions(const std::shared_ptr<t_data_table>& flattened_masked);
 
-    /**
-     * @brief Compute all expressions on each registered context using all
-     * data and transition tables. This method is called on all subsequent
-     * updates applied after the first update.
-     */
     void _compute_expressions(
         const std::shared_ptr<t_data_table>& master,
         const std::shared_ptr<t_data_table>& flattened
+    );
+
+    void _process_windows(
+        const std::shared_ptr<t_data_table>& flattened,
+        const std::vector<t_rlookup>& lookup
     );
 
 private:
@@ -419,6 +425,10 @@ private:
     std::chrono::high_resolution_clock::time_point m_epoch;
     std::function<void()> m_pool_cleanup;
     bool m_was_updated;
+    bool m_removes_enabled = false;
+    bool m_reset_pending = false;
+    std::shared_ptr<t_data_table> m_removed_pkeys;
+    std::shared_ptr<t_data_table> m_reset_pkeys;
 
     std::shared_ptr<t_expression_vocab> m_expression_vocab;
     std::shared_ptr<t_regex_mapping> m_expression_regex_mapping;
@@ -460,10 +470,10 @@ t_gnode::notify_context(
 
     ctx->step_begin();
 
-    if (ctx->num_expressions() > 0) {
+    if (ctx->has_derived_columns()) {
         // Join expression tables on the context with gnode tables and pass
-        // those into the context so there is no distinction between expression
-        // and real columns for the context.
+        // those into the context so there is no distinction between
+        // expression/window and real columns for the context.
         std::shared_ptr<t_expression_tables> ctx_expression_tables =
             ctx->get_expression_tables();
 
@@ -535,10 +545,10 @@ t_gnode::update_context_from_state(
     //  to update its registered contexts with the new data. `is_registration`
     //  is `false` here — a subscriber may have attached between context
     //  creation and the first update, and expects to see all rows as deltas.
-    if (ctx->num_expressions() > 0) {
-        // If the context has expression columns, it has already been computed
-        // in `process_table` and we can join the "real" and expression columns
-        // together and pass it to the context.
+    if (ctx->has_derived_columns()) {
+        // If the context has expression or window columns, they have already
+        // been computed in `process_table` and we can join the "real" and
+        // derived columns together and pass it to the context.
         std::shared_ptr<t_expression_tables> ctx_expression_tables =
             ctx->get_expression_tables();
         std::shared_ptr<t_data_table> joined_flattened =
@@ -613,9 +623,25 @@ t_gnode::_process_column(
                     prev_pkey_eq
                 );
 
-                dcolumn->set_nth<DATA_T>(
-                    added_count, cur_valid ? cur_value - prev_value : DATA_T(0)
-                );
+                // Mirrors `t_gstate::update_master_column`: an invalid cell
+                // is an explicit null if CLEAR (removes this row's
+                // contribution from additive aggregates), and a no-op if
+                // INVALID (column omitted from a partial update). A slot's
+                // raw bits are unspecified when its validity flag is false,
+                // so only the valid side of a transition may be read (#1256).
+                DATA_T delta_value;
+                if (cur_valid) {
+                    delta_value =
+                        cur_value - (prev_valid ? prev_value : DATA_T(0));
+                } else if (fcolumn->is_cleared(idx) && prev_valid) {
+                    SUPPRESS_WARNINGS_VC(4146)
+                    delta_value = -prev_value;
+                    RESTORE_WARNINGS_VC()
+                } else {
+                    delta_value = DATA_T(0);
+                }
+
+                dcolumn->set_nth<DATA_T>(added_count, delta_value);
                 dcolumn->set_valid(added_count, true);
 
                 pcolumn->set_nth<DATA_T>(added_count, prev_value);
@@ -643,7 +669,9 @@ t_gnode::_process_column(
                     ccolumn->set_valid(added_count, prev_valid);
 
                     SUPPRESS_WARNINGS_VC(4146)
-                    dcolumn->set_nth<DATA_T>(added_count, -prev_value);
+                    dcolumn->set_nth<DATA_T>(
+                        added_count, prev_valid ? -prev_value : DATA_T(0)
+                    );
                     RESTORE_WARNINGS_VC()
                     dcolumn->set_valid(added_count, true);
 

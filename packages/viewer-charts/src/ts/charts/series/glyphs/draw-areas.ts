@@ -187,7 +187,10 @@ export class AreaGlyph {
 
     /**
      * Bind persistent strip buffers and dispatch one TRIANGLE_STRIP per
-     * series-run. Skips hidden series.
+     * series-run. Skips hidden series. `splitFilter` (faceted frames)
+     * draws only the series whose `splitIdx` matches; `aggRange` (mixed
+     * glyph-run frames) only those whose `aggIdx` lies in the inclusive
+     * run span.
      */
     draw(
         chart: SeriesChart,
@@ -196,6 +199,8 @@ export class AreaGlyph {
         projLeft: Float32Array,
         projRight: Float32Array,
         opacity: number,
+        splitFilter?: number,
+        aggRange?: { start: number; end: number },
     ): void {
         const buf = this._buffers;
         const cache = this._program;
@@ -209,6 +214,21 @@ export class AreaGlyph {
         const hidden = chart._hiddenSeries;
         for (const s of buf.series) {
             if (hidden.has(s.seriesId)) {
+                continue;
+            }
+
+            if (
+                splitFilter !== undefined &&
+                chart._series[s.seriesId].splitIdx !== splitFilter
+            ) {
+                continue;
+            }
+
+            const aggIdx = chart._series[s.seriesId].aggIdx;
+            if (
+                aggRange !== undefined &&
+                (aggIdx < aggRange.start || aggIdx > aggRange.end)
+            ) {
                 continue;
             }
 

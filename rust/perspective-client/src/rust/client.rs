@@ -29,11 +29,11 @@ use crate::proto::{
     HostedTable, JoinType, MakeJoinTableReq, MakeTableReq, RemoveHostedTablesUpdateReq, Request,
     Response, ServerError, ServerSystemInfoReq,
 };
-use crate::table::{JoinOptions, Table, TableInitOptions, TableOptions};
+use crate::table::{JoinOptions, Table, TableInitOptions, TableOptions, ViewBinding};
 use crate::table_data::{TableData, UpdateData};
 use crate::table_ref::TableRef;
 use crate::utils::*;
-use crate::view::{OnUpdateData, ViewWindow};
+use crate::view::{OnRemoveData, OnUpdateData, ViewWindow};
 use crate::{OnUpdateMode, OnUpdateOptions, asyncfn, clone};
 
 /// Metadata about the engine runtime (such as total heap utilization).
@@ -103,6 +103,25 @@ impl Features {
             })
             .collect::<Vec<_>>()
     }
+
+    /// Unlike [`Features::get_group_rollup_modes`], an empty feature list
+    /// resolves to `[Flat]` rather than "no constraint" - servers predating
+    /// (or not implementing) split rollup can only produce leaf columns, so
+    /// absence must not offer the `Rollup` option.
+    pub fn get_split_rollup_modes(&self) -> Vec<crate::config::SplitRollupMode> {
+        if self.split_rollup_mode.is_empty() {
+            return vec![crate::config::SplitRollupMode::Flat];
+        }
+
+        self.split_rollup_mode
+            .iter()
+            .map(|x| {
+                crate::config::SplitRollupMode::from(
+                    crate::proto::SplitRollupMode::try_from(*x).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 impl Deref for Features {
@@ -121,12 +140,33 @@ impl GetFeaturesResp {
             .first()
             .map(|x| x.as_str())
     }
+
+    /// The window aggregates this server supports for a `col_type` SOURCE
+    /// column, in the server's declared (menu) order.
+    pub fn get_window_aggregates(
+        &self,
+        col_type: ColumnType,
+    ) -> Vec<crate::proto::WindowAggregateArgs> {
+        self.window_aggregates
+            .get(&(col_type as u32))
+            .map(|x| x.options.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether this server supports window columns at all - the
+    /// `window_aggregates` declaration is the single source of truth.
+    pub fn has_window_aggregates(&self) -> bool {
+        self.window_aggregates
+            .values()
+            .any(|x| !x.options.is_empty())
+    }
 }
 
-type BoxFn<I, O> = Box<dyn Fn(I) -> O + Send + Sync + 'static>;
 type Box2Fn<I, J, O> = Box<dyn Fn(I, J) -> O + Send + Sync + 'static>;
 
 type Subscriptions<C> = Arc<RwLock<HashMap<u32, C>>>;
+type UpdateCallback =
+    Arc<dyn Fn(Response) -> BoxFuture<'static, Result<(), ClientError>> + Send + Sync + 'static>;
 type OnErrorCallback =
     Box2Fn<ClientError, Option<ReconnectCallback>, BoxFuture<'static, Result<(), ClientError>>>;
 
@@ -214,7 +254,7 @@ pub struct Client {
     id_gen: IDGen,
     subscriptions_errors: Subscriptions<OnErrorCallback>,
     subscriptions_once: Subscriptions<OnceCallback>,
-    subscriptions: Subscriptions<BoxFn<Response, BoxFuture<'static, Result<(), ClientError>>>>,
+    subscriptions: Subscriptions<UpdateCallback>,
 }
 
 impl PartialEq for Client {
@@ -288,8 +328,11 @@ impl Client {
             drop(wr);
             handler(msg)?;
             return Ok(true);
-        } else if let Some(handler) = self.subscriptions.try_read().unwrap().get(&msg.msg_id) {
-            drop(wr);
+        }
+
+        let handler = self.subscriptions.read().await.get(&msg.msg_id).cloned();
+        drop(wr);
+        if let Some(handler) = handler {
             handler(msg).await?;
             return Ok(true);
         }
@@ -422,7 +465,7 @@ impl Client {
         self.subscriptions
             .write()
             .await
-            .insert(msg.msg_id, Box::new(move |x| Box::pin(on_update(x))));
+            .insert(msg.msg_id, Arc::new(move |x| Box::pin(on_update(x))));
 
         tracing::debug!("SEND {}", msg);
         if let Err(e) = (self.send)(msg).await {
@@ -532,6 +575,21 @@ impl Client {
         };
 
         if let TableData::View(view) = &input {
+            let mut options = options;
+            let source_index = view.source.as_ref().and_then(|x| x.options.index.clone());
+            if let (None, Some(index)) = (&options.index, &source_index) {
+                let config = view.get_config().await?;
+                let is_flat = config.group_by.is_empty() && config.split_by.is_empty();
+                let has_index = config.columns.iter().flatten().any(|x| x == index);
+                if is_flat && has_index {
+                    options.index = Some(index.clone());
+                }
+            }
+
+            if options.index.is_none() && options.limit.is_none() {
+                options.limit = view.source.as_ref().and_then(|x| x.options.limit);
+            }
+
             let window = ViewWindow::default();
             let arrow = view.to_arrow(window).await?;
             let mut table = self
@@ -549,8 +607,27 @@ impl Client {
                 mode: Some(OnUpdateMode::Row),
             };
 
-            let on_update_token = view.on_update(callback, options).await?;
-            table.view_update_token = Some(on_update_token);
+            let update_token = view.on_update(callback, options).await?;
+            let remove_token = if source_index.is_some() && source_index == table.get_index() {
+                let table_ = table.clone();
+                let callback = asyncfn!(table_, async move |removed: OnRemoveData| {
+                    if let Some(indices) = removed.indices.as_ref().filter(|x| !x.is_empty()) {
+                        let indices = UpdateData::Arrow(indices.clone().into());
+                        table_.remove(indices).await.unwrap_or_log();
+                    }
+                });
+
+                Some(view.on_remove(callback).await?)
+            } else {
+                None
+            };
+
+            table.view_binding = Some(ViewBinding {
+                view: view.clone(),
+                update_token,
+                remove_token,
+            });
+
             Ok(table)
         } else {
             self.crate_table_inner(input, options.into(), entity_id)
@@ -619,6 +696,7 @@ impl Client {
                 index: Some(on.to_owned()),
                 limit: None,
                 page_to_disk: None,
+                list_flatten: None,
             })),
             resp => Err(resp.into()),
         }
@@ -663,9 +741,8 @@ impl Client {
             let options = TableOptions {
                 index: info.index,
                 limit: info.limit,
-                // `page_to_disk` is a server-side property not surfaced in table
-                // info; it does not affect client-side behavior.
                 page_to_disk: None,
+                list_flatten: None,
             };
 
             let client = self.clone();

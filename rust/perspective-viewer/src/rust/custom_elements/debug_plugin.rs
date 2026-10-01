@@ -65,8 +65,18 @@ impl PerspectiveDebugPluginElement {
         JsValue::UNDEFINED
     }
 
+    /// Delegates to `draw()` VIRTUALLY — through the JS element's `draw`
+    /// property, never `self.draw(view)` (Rust static dispatch).
     pub fn update(&self, view: &perspective_js::View) -> ApiFuture<()> {
-        self.draw(view)
+        clone!(self.elem, view);
+        ApiFuture::new(async move {
+            let draw = js_sys::Reflect::get(&elem, &JsValue::from_str("draw"))?
+                .dyn_into::<js_sys::Function>()?;
+
+            let task = draw.call1(&elem, &JsValue::from(view))?;
+            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&task)).await?;
+            Ok(())
+        })
     }
 
     /// # Notes

@@ -34,34 +34,37 @@ export function applyColumnHeaderStyles(
     // Style selected column for settings panel
     const selectedColumn = model._column_settings_selected_column;
     const len = headerRows.length;
-    const settings_open = viewer.hasAttribute("settings");
+    const settings_open =
+        viewer.hasAttribute("settings") &&
+        viewer.getActivePanel() === model._panel;
+
+    const name_row = model._config.split_by.length;
+    const has_menu_row = len === name_row + 2;
 
     // Set row IDs
     if (len <= 1) {
         headerRows[0]?.row.removeAttribute("id");
     } else {
         headerRows.forEach(({ row }, i) => {
-            const offset = settings_open ? 1 : 0;
             const id =
-                i === len - (offset + 1)
+                i === name_row
                     ? "psp-column-titles"
-                    : i === len - offset
+                    : has_menu_row && i === name_row + 1
                       ? "psp-column-edit-buttons"
                       : null;
+
             id ? row.setAttribute("id", id) : row.removeAttribute("id");
         });
     }
 
     viewer.classList.toggle("psp-menu-open", !!selectedColumn);
 
-    // Style column titles and edit buttons when settings open
-    if (settings_open && len >= 2) {
-        const titlesRow = headerRows[len - 2];
-        const editBtnsRow = headerRows[len - 1];
+    if (settings_open && name_row < len) {
+        const titlesRow = headerRows[name_row];
+        const editBtnsRow = has_menu_row ? headerRows[name_row + 1] : undefined;
 
-        if (titlesRow && editBtnsRow) {
-            // Clear menu-open from other rows
-            headerRows.slice(0, len - 2).forEach(({ cells }) => {
+        if (titlesRow) {
+            headerRows.slice(0, name_row).forEach(({ cells }) => {
                 cells.forEach(({ element }) => {
                     element.classList.toggle("psp-menu-open", false);
                 });
@@ -69,32 +72,49 @@ export function applyColumnHeaderStyles(
 
             for (let i = 0; i < titlesRow.cells.length; i++) {
                 const title = titlesRow.cells[i]?.element;
-                const editBtn = editBtnsRow.cells[i]?.element;
-                if (!title || !editBtn) {
+                if (!title) {
                     continue;
                 }
 
                 const open = title.textContent === selectedColumn;
                 title.classList.toggle("psp-menu-open", open);
-                editBtn.classList.toggle("psp-menu-open", open);
+                editBtnsRow?.cells[i]?.element.classList.toggle(
+                    "psp-menu-open",
+                    open,
+                );
             }
         }
     }
 
     // Style the actual column header rows
+    const single_header_row = len <= 1;
     const colHeadersIndex = model._config.split_by.length;
+    const menuHeadersIndex = model._config.split_by.length + 1;
     if (colHeadersIndex < headerRows.length) {
         const colHeaders = headerRows[colHeadersIndex];
         if (colHeaders) {
-            styleColumnHeaderRow(model, colHeaders, regularTable, false);
+            styleColumnHeaderRow(
+                model,
+                colHeaders,
+                regularTable,
+                false,
+                menuHeadersIndex >= headerRows.length,
+                single_header_row,
+            );
         }
     }
 
-    const menuHeadersIndex = model._config.split_by.length + 1;
     if (menuHeadersIndex < headerRows.length) {
         const menuHeaders = headerRows[menuHeadersIndex];
         if (menuHeaders) {
-            styleColumnHeaderRow(model, menuHeaders, regularTable, true);
+            styleColumnHeaderRow(
+                model,
+                menuHeaders,
+                regularTable,
+                true,
+                true,
+                single_header_row,
+            );
         }
     }
 }

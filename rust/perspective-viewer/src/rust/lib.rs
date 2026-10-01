@@ -20,15 +20,16 @@
 #![feature(stmt_expr_attributes)]
 #![feature(try_blocks)]
 #![allow(async_fn_in_trait)]
-#![feature(more_qualified_paths)]
 #![warn(
     clippy::all,
     clippy::panic_in_result_fn,
-    clippy::await_holding_refcell_ref,
     clippy::fallible_impl_from,
     clippy::unneeded_field_pattern
 )]
+#![deny(clippy::await_holding_refcell_ref)]
 
+#[cfg(feature = "llm-agent")]
+mod agent;
 pub mod components;
 pub mod config;
 pub mod custom_elements;
@@ -45,7 +46,9 @@ mod session;
 
 #[doc(hidden)]
 pub mod tasks;
+pub mod ui;
 pub mod utils;
+mod workspace;
 
 #[macro_use]
 extern crate macro_rules_attribute;
@@ -56,9 +59,7 @@ use std::cell::RefCell;
 use perspective_js::utils::*;
 use wasm_bindgen::prelude::*;
 
-use crate::custom_elements::copy_dropdown::CopyDropDownMenuElement;
 use crate::custom_elements::debug_plugin::PerspectiveDebugPluginElement;
-use crate::custom_elements::export_dropdown::ExportDropDownMenuElement;
 use crate::custom_elements::viewer::PerspectiveViewerElement;
 use crate::utils::define_web_component;
 
@@ -66,23 +67,61 @@ use crate::utils::define_web_component;
 const TS_APPEND_CONTENT: &'static str = r#"
 import type {
     ColumnType,
-    TableInitOptions,
     ColumnWindow,
-    ViewWindow, 
-    TypedArrayWindow,
-    OnUpdateOptions,
-    JoinOptions,
-    UpdateOptions,
     DeleteOptions,
-    ViewConfigUpdate,
+    Features,
+    JoinOptions,
+    OnRemoveData,
+    OnUpdateData,
+    OnUpdateOptions,
+    Scalar,
     SystemInfo,
+    TableInitOptions,
+    TypedArrayWindow,
+    UpdateOptions,
+    ViewConfig,
+    ViewConfigUpdate,
+    ViewWindow,
 } from "@perspective-dev/client";
 
 export type * from "../../src/ts/ts-rs/ViewerConfig.d.ts";
 export type * from "../../src/ts/ts-rs/ViewerConfigUpdate.d.ts";
+export type * from "../../src/ts/ts-rs/ViewerConfigInitial.d.ts";
 export type * from "../../src/ts/ts-rs/PluginStaticConfig.d.ts";
+export type * from "../../src/ts/ts-rs/WorkspaceConfig.d.ts";
+export type * from "../../src/ts/ts-rs/WorkspaceConfigUpdate.d.ts";
+export type * from "../../src/ts/ts-rs/ExportMethod.d.ts";
+export type * from "../../src/ts/ts-rs/PanelOptions.d.ts";
+export type * from "../../src/ts/ts-rs/RestoreOptions.d.ts";
+export type * from "../../src/ts/ts-rs/RestoreWorkspaceOptions.d.ts";
+export type * from "../../src/ts/ts-rs/AddPanelOptions.d.ts";
+export type * from "../../src/ts/ts-rs/SaveWorkspaceOptions.d.ts";
+export type * from "../../src/ts/ts-rs/ClientOptions.d.ts";
+export type * from "../../src/ts/ts-rs/ExportOptions.d.ts";
+export type * from "../../src/ts/ts-rs/GetTableOptions.d.ts";
+export type * from "../../src/ts/ts-rs/GetClientOptions.d.ts";
+export type * from "../../src/ts/ts-rs/GetViewOptions.d.ts";
+export type * from "../../src/ts/ts-rs/GetViewMode.d.ts";
+export type * from "../../src/ts/ts-rs/CustomNumberFormatConfig.d.ts";
+export type * from "../../src/ts/ts-rs/NumberFormatStyle.d.ts";
+export type * from "../../src/ts/ts-rs/Notation.d.ts";
+export type * from "../../src/ts/ts-rs/DatetimeFormatType.d.ts";
+
+import type {GetTableOptions} from "../../src/ts/ts-rs/GetTableOptions.d.ts";
+import type {PanelOptions} from "../../src/ts/ts-rs/PanelOptions.d.ts";
+import type {RestoreOptions} from "../../src/ts/ts-rs/RestoreOptions.d.ts";
+import type {RestoreWorkspaceOptions} from "../../src/ts/ts-rs/RestoreWorkspaceOptions.d.ts";
+import type {AddPanelOptions} from "../../src/ts/ts-rs/AddPanelOptions.d.ts";
+import type {SaveWorkspaceOptions} from "../../src/ts/ts-rs/SaveWorkspaceOptions.d.ts";
+import type {ExportOptions} from "../../src/ts/ts-rs/ExportOptions.d.ts";
+import type {GetClientOptions} from "../../src/ts/ts-rs/GetClientOptions.d.ts";
+import type {GetViewOptions} from "../../src/ts/ts-rs/GetViewOptions.d.ts";
+import type {ClientOptions} from "../../src/ts/ts-rs/ClientOptions.d.ts";
 import type {ViewerConfig} from "../../src/ts/ts-rs/ViewerConfig.d.ts";
 import type {ViewerConfigUpdate} from "../../src/ts/ts-rs/ViewerConfigUpdate.d.ts";
+import type {ViewerConfigInitial} from "../../src/ts/ts-rs/ViewerConfigInitial.d.ts";
+import type {WorkspaceConfig} from "../../src/ts/ts-rs/WorkspaceConfig.d.ts";
+import type {WorkspaceConfigUpdate} from "../../src/ts/ts-rs/WorkspaceConfigUpdate.d.ts";
 "#;
 
 /// Register a plugin globally.
@@ -141,8 +180,6 @@ pub fn js_get_worker_url() -> Result<web_sys::Url, JsValue> {
 pub fn bootstrap_web_components(psp: &JsValue) {
     define_web_component::<PerspectiveViewerElement>(psp);
     define_web_component::<PerspectiveDebugPluginElement>(psp);
-    define_web_component::<CopyDropDownMenuElement>(psp);
-    define_web_component::<ExportDropDownMenuElement>(psp);
 }
 
 /// Defining the web components needs an extern struct to reference the

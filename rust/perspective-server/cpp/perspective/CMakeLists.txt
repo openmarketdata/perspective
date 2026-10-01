@@ -124,8 +124,15 @@ else()
 endif()
 
 if(DEFINED ENV{PSP_USE_CCACHE})
-    set(CMAKE_C_COMPILE_LAUNCHER ccache)
-    set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+    # `PSP_CCACHE_BINARY` selects an alternate launcher (CI uses `sccache`
+    # on Windows, where MSVC support in ccache is unreliable)
+    if(DEFINED ENV{PSP_CCACHE_BINARY})
+        set(CMAKE_C_COMPILER_LAUNCHER $ENV{PSP_CCACHE_BINARY})
+        set(CMAKE_CXX_COMPILER_LAUNCHER $ENV{PSP_CCACHE_BINARY})
+    else()
+        set(CMAKE_C_COMPILER_LAUNCHER ccache)
+        set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+    endif()
 endif()
 
 if(NOT DEFINED PSP_CPP_BUILD)
@@ -186,6 +193,9 @@ string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
 if(CMAKE_BUILD_TYPE_LOWER STREQUAL debug)
     set(BUILD_MESSAGE "${BUILD_MESSAGE}\n${Red}Building DEBUG${ColorReset}")
     add_definitions(-DPSP_DEBUG)
+    add_definitions(-DPSP_STORAGE_VERIFY)
+    add_definitions(-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
+    add_definitions(-D_GLIBCXX_ASSERTIONS)
 else()
     set(BUILD_MESSAGE "${BUILD_MESSAGE}\n${Cyan}Building RELEASE${ColorReset}")
 endif()
@@ -202,6 +212,10 @@ if(PSP_PYTHON_BUILD AND MACOS)
     # don't link against build python
     # https://blog.tim-smith.us/2015/09/python-extension-modules-os-x/
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
+endif()
+
+if(EMSCRIPTEN)
+    set(CMAKE_HAVE_LIBC_PTHREAD TRUE CACHE BOOL "psp: satisfy FindThreads on WASM without enabling pthreads" FORCE)
 endif()
 
 # ######################
@@ -256,6 +270,7 @@ if(PSP_WASM_BUILD)
             -mbulk-memory \
             -msimd128 \
             -mrelaxed-simd \
+            -fopenmp-simd \
             -flto \
             --emit-tsd=perspective-server.d.ts \
         ")
@@ -354,7 +369,7 @@ endif()
 set(RAPIDJSON_BUILD_TESTS OFF CACHE BOOL "Disable rapidjson tests")
 
 if(PSP_PYODIDE)
-    set(RELOCATABLE_FLAGS " -sRELOCATABLE=1 -sSIDE_MODULE=2 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm \ ")
+    set(RELOCATABLE_FLAGS " -sSIDE_MODULE=2 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm \ ")
     string(APPEND CMAKE_EXE_LINKER_FLAGS "${RELOCATABLE_FLAGS} -sWASM_BIGINT=1 ")
     string(APPEND CMAKE_C_FLAGS "${RELOCATABLE_FLAGS}")
     string(APPEND CMAKE_CXX_FLAGS "${RELOCATABLE_FLAGS}")
@@ -362,6 +377,12 @@ if(PSP_PYODIDE)
 
     # Emscripten exceptions
     string(APPEND CMAKE_CXX_FLAGS " -fexceptions")
+endif()
+
+if(PSP_WASM_BUILD AND NOT CMAKE_BUILD_TYPE_LOWER STREQUAL debug)
+    set(PSP_DEP_SIMD_FLAGS " -flto -mbulk-memory -msimd128 -mrelaxed-simd ")
+    string(APPEND CMAKE_C_FLAGS "${PSP_DEP_SIMD_FLAGS}")
+    string(APPEND CMAKE_CXX_FLAGS "${PSP_DEP_SIMD_FLAGS}")
 endif()
 
 # Build (read: download and extract) header-only dependencies from external sources
@@ -429,6 +450,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/aggspec.cpp
     ${PSP_CPP_SRC}/src/cpp/arg_sort.cpp
     ${PSP_CPP_SRC}/src/cpp/arrow_loader.cpp
+    ${PSP_CPP_SRC}/src/cpp/arrow_normalize.cpp
     ${PSP_CPP_SRC}/src/cpp/arrow_writer.cpp
     ${PSP_CPP_SRC}/src/cpp/base.cpp
     ${PSP_CPP_SRC}/src/cpp/base_impl_linux.cpp
@@ -447,6 +469,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/compat_impl_wasm.cpp
     ${PSP_CPP_SRC}/src/cpp/compat_impl_win.cpp
     ${PSP_CPP_SRC}/src/cpp/computed_expression.cpp
+    ${PSP_CPP_SRC}/src/cpp/window.cpp
     ${PSP_CPP_SRC}/src/cpp/computed_function.cpp
     ${PSP_CPP_SRC}/src/cpp/config.cpp
     ${PSP_CPP_SRC}/src/cpp/context_base.cpp
@@ -470,6 +493,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/filter.cpp
     ${PSP_CPP_SRC}/src/cpp/flat_traversal.cpp
     ${PSP_CPP_SRC}/src/cpp/get_data_extents.cpp
+    ${PSP_CPP_SRC}/src/cpp/json_loader.cpp
     ${PSP_CPP_SRC}/src/cpp/gnode.cpp
     ${PSP_CPP_SRC}/src/cpp/gnode_state.cpp
     ${PSP_CPP_SRC}/src/cpp/mask.cpp
@@ -573,23 +597,12 @@ else()
 # -s MEMORY_GROWTH_GEOMETRIC_STEP=1.0 \
 # -s MEMORY_GROWTH_GEOMETRIC_CAP=536870912 \
 
+    set(PSP_FILESYSTEM_FLAGS "-s NO_FILESYSTEM=1 ")
+    set(PSP_CLOSURE_FLAGS "--closure=1 ")
+
     # On-disk tables in the browser are backed by OPFS via emscripten's WasmFS.
-    # `PSP_WASM_OPFS` swaps the default `NO_FILESYSTEM` (memory-only) build for
-    # `WASMFS` + `FORCE_FILESYSTEM`, and enables the OPFS backend. `JSPI` provides
-    # the synchronous-looking OPFS access the WasmFS OPFS backend needs without
-    # SharedArrayBuffer/cross-origin-isolation (`-pthread`). `JSPI` is backwards
-    # compatible: the module loads and runs in-memory tables fine on non-JSPI
-    # browsers (it has no `main`/async imports wrapped at instantiation); the JSPI
-    # API is only reached when an actual OPFS op runs, i.e. when `page_to_disk` is used
-    # (the JS client gates that on JSPI being present). Closure is incompatible
-    # with the WasmFS JS glue, so it is disabled in that case.
     if(PSP_WASM_OPFS)
-        set(PSP_FILESYSTEM_FLAGS "-s NO_FILESYSTEM=1 ")
-        set(PSP_CLOSURE_FLAGS "--closure=1 ")
         add_compile_definitions(PSP_WASM_OPFS_PERSIST=1)
-    else()
-        set(PSP_FILESYSTEM_FLAGS "-s NO_FILESYSTEM=1 ")
-        set(PSP_CLOSURE_FLAGS "--closure=1 ")
     endif()
 
     set(PSP_WASM_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} \

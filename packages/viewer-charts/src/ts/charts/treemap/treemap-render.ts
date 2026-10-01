@@ -23,6 +23,7 @@ import { Theme } from "../../theme/theme";
 import { resolvePalette, type Vec3 } from "../../theme/palette";
 import { type GradientStop } from "../../theme/gradient";
 import { buildFacetGrid } from "../../layout/facet-grid";
+import { legendTreeGutter } from "../../interaction/legend-controller";
 import { leafColor, leafRGBA, luminance } from "../common/leaf-color";
 import treemapVert from "../../shaders/treemap.vert.glsl";
 import treemapFrag from "../../shaders/treemap.frag.glsl";
@@ -70,7 +71,12 @@ export function renderTreemapFrame(
             ? chart._uniqueColorLabels.size > 1
             : chart._colorMode === "numeric" &&
               chart._colorMin < chart._colorMax;
-    const legendW = hasLegend ? 90 : 0;
+    const legendW = legendTreeGutter(
+        chart._pluginConfig,
+        hasLegend,
+        90,
+        chart._colorMode === "series" ? chart._uniqueColorLabels.size : 0,
+    );
 
     // Scratch buffer for the ordered-layout child ids. Worst case:
     // active children at every level = store.count. Reuse the chart's
@@ -173,7 +179,9 @@ export function renderTreemapFrame(
 
     gl.drawArrays(gl.TRIANGLES, 0, chart._vertexCount);
 
-    renderTreemapChromeOverlay(chart);
+    // Deferred past the GPU fence (see `_defer2D`) so the chrome canvas
+    // doesn't present ahead of the GL tiles on resize.
+    chart._defer2D(() => renderTreemapChromeOverlay(chart));
 }
 
 /**
@@ -465,6 +473,11 @@ function emitRect(
  * tooltip + highlight on top.
  */
 export function renderTreemapChromeOverlay(chart: TreemapChart): void {
+    paintTreemapChromeOverlay(chart);
+    chart.presentOverlay();
+}
+
+function paintTreemapChromeOverlay(chart: TreemapChart): void {
     if (!chart._chromeCanvas || chart._currentRootId === NULL_NODE) {
         return;
     }

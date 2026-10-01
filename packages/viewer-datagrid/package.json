@@ -1,7 +1,29 @@
 {
     "name": "@perspective-dev/viewer-datagrid",
-    "version": "4.5.1",
-    "description": "Perspective datagrid plugin based on `regular-table`",
+    "version": "5.5.1",
+    "description": "Virtual-scrolling, editable data grid and pivot table plugin for `<perspective-viewer>`, built on `regular-table`.",
+    "keywords": [
+        "perspective",
+        "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
+        "charts",
+        "visualization",
+        "dashboard",
+        "analytics",
+        "bi",
+        "streaming",
+        "real-time",
+        "wasm",
+        "webassembly",
+        "arrow",
+        "table",
+        "grid",
+        "virtual-scroll",
+        "web-component"
+    ],
+    "homepage": "https://perspective-dev.github.io",
     "unpkg": "dist/cdn/perspective-viewer-datagrid.js",
     "jsdelivr": "dist/cdn/perspective-viewer-datagrid.js",
     "exports": {
@@ -33,14 +55,14 @@
     "author": "",
     "license": "Apache-2.0",
     "dependencies": {
-        "@perspective-dev/client": "workspace:",
-        "@perspective-dev/viewer": "workspace:",
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
         "regular-table": "catalog:"
     },
     "devDependencies": {
         "lightningcss": "catalog:",
-        "@perspective-dev/esbuild-plugin": "workspace:",
-        "@perspective-dev/test": "workspace:",
+        "@perspective-dev/esbuild-plugin": "workspace:^",
+        "@perspective-dev/test": "workspace:^",
         "prettier": "catalog:",
         "typescript": "catalog:",
         "zx": "catalog:"

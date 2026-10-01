@@ -21,7 +21,7 @@ Create a server that exposes a DuckDB database to browser clients:
 import duckdb
 import tornado.web
 import tornado.ioloop
-from perspective import DuckDBVirtualServer
+from perspective.virtual_servers.duckdb import DuckDBVirtualServer
 from perspective.handlers.tornado import PerspectiveTornadoHandler
 
 # Create DuckDB connection and load data
@@ -47,6 +47,19 @@ const websocket = await perspective.websocket("ws://localhost:8080/websocket");
 const table = await websocket.open_table("my_table");
 document.getElementById("viewer").load(table);
 ```
+
+## Window functions
+
+Window columns are DuckDB's own functions, under their DuckDB names — the
+advertised name is emitted into the `OVER` clause verbatim.
+
+| | |
+| --- | --- |
+| Aggregating | `sum` `avg` `count` `min` `max` `product` `median` |
+| Deviation / variance | `stddev_samp` `stddev_pop` `var_samp` `var_pop` |
+| Navigation | `first_value` `last_value` `nth_value` `lag` `lead` |
+| Ranking | `row_number` `rank` `dense_rank` `percent_rank` `cume_dist` `ntile` |
+| Perspective's own | `diff` `rate` |
 
 ## Examples
 

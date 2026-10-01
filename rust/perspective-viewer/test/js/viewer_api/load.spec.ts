@@ -14,6 +14,7 @@ import {
     test,
     expect,
     compareContentsToSnapshot,
+    getLightContents,
     getShadowContents,
 } from "../helpers.ts";
 
@@ -29,7 +30,34 @@ test.describe("Viewer Load", () => {
             const goodTable = (await window.WORKER).table("a,b,c\n1,2,3");
             return viewer.load(goodTable);
         });
-        await expect(viewer).toHaveText(/"a","b","c"/); // column titles
+        await expect(viewer).toHaveText(/"a","b","c"/);
+        await compareContentsToSnapshot(await getLightContents(page));
+    });
+
+    test("load(client) > the first restore applies element-level settings", async ({
+        page,
+    }) => {
+        await page.goto("/rust/perspective-viewer/test/html/blank.html");
+        await page.waitForFunction(() => "WORKER" in window);
+
+        const viewer = page.locator("perspective-viewer");
+        const settings = await viewer.evaluate(async (viewer) => {
+            const worker = await window.WORKER;
+            await worker.table("a,b,c\n1,2,3", { name: "settings_probe" });
+            await viewer.load(worker);
+            await viewer.restore({
+                table: "settings_probe",
+                plugin: "Debug",
+                settings: true,
+            });
+
+            return (await viewer.save()).settings;
+        });
+
+        expect(settings).toBe(true);
+        await expect(
+            page.locator("perspective-viewer #settings_panel"),
+        ).toBeVisible();
     });
 
     test("load > rejects with failed Table promise", async ({ page }) => {
@@ -90,14 +118,10 @@ test.describe("Viewer Load", () => {
             await viewer.restore({ settings: true });
             const table = await viewer.getTable();
             await viewer.load(table);
-            await viewer.flush();
             return viewer.shadowRoot.innerHTML;
         });
 
-        await compareContentsToSnapshot(
-            contents,
-            "load-called-twice-with-the-same-table.txt",
-        );
+        await compareContentsToSnapshot(contents);
     });
 
     test("load > does not throw when restore is called during a failed load", async ({
@@ -138,5 +162,71 @@ test.describe("Viewer Load", () => {
             'Error::Failed to construct table from JsValue("Intentional Load Error")',
         ]);
         consoleLogs.expectedLogs.push("error", /Intentional Load Error/);
+    });
+
+    test("load is well-ordered when unawaited preceding a restore", async ({
+        page,
+    }) => {
+        await page.goto("/rust/perspective-viewer/test/html/superstore.html");
+        await page.evaluate(async () => {
+            while (!window["__TEST_PERSPECTIVE_READY__"]) {
+                await new Promise((x) => setTimeout(x, 10));
+            }
+        });
+
+        const contents = await page.evaluate(async () => {
+            const viewer = document.querySelector("perspective-viewer");
+            const table = await viewer!.getTable();
+            await viewer?.delete();
+            document.body.removeChild(viewer!);
+            const viewer2 = document.createElement("perspective-viewer");
+            document.body.appendChild(viewer2);
+
+            // Don't await
+            viewer2.load(table);
+
+            await viewer2.restore({ group_by: ["State"] });
+            return await viewer2.save();
+        });
+
+        expect(contents).toEqual({
+            aggregates: {},
+            columns: [
+                "Row ID",
+                "Order ID",
+                "Order Date",
+                "Ship Date",
+                "Ship Mode",
+                "Customer ID",
+                "Segment",
+                "Country",
+                "City",
+                "State",
+                "Postal Code",
+                "Region",
+                "Product ID",
+                "Category",
+                "Sub-Category",
+                "Sales",
+                "Quantity",
+                "Discount",
+                "Profit",
+            ],
+            columns_config: {},
+            expressions: {},
+            filter: [],
+            group_by: ["State"],
+            group_rollup_mode: "rollup",
+            split_rollup_mode: "flat",
+            plugin: "Debug",
+            plugin_config: {},
+            settings: false,
+            sort: [],
+            split_by: [],
+            table: "load-viewer-csv",
+            theme: "Pro Light",
+            title: null,
+            version: "5.5.1",
+        });
     });
 });

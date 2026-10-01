@@ -164,6 +164,52 @@ const std = (nums) => {
             table.delete();
         });
 
+        test("`first` aggregate with a hidden sort column does not crash", async function () {
+            const table = await perspective.table([
+                { g: "x", v: 1 },
+                { g: "x", v: 2 },
+                { g: "y", v: 3 },
+            ]);
+            const view = await table.view({
+                group_by: ["g"],
+                columns: ["g"],
+                aggregates: { v: "first" },
+                sort: [["v", "desc"]],
+            });
+
+            const result = await view.to_json();
+            const paths = result.map((r) => r.__ROW_PATH__);
+            expect(paths.length).toEqual(3);
+            expect(paths).toContainEqual([]);
+            expect(paths).toContainEqual(["x"]);
+            expect(paths).toContainEqual(["y"]);
+            await view.delete();
+            await table.delete();
+        });
+
+        test("`max by` with a non-visible by-column", async function () {
+            const table = await perspective.table([
+                { g: "x", v: 1, w: 10 },
+                { g: "x", v: 2, w: 20 },
+                { g: "y", v: 3, w: 5 },
+            ]);
+            const view = await table.view({
+                group_by: ["g"],
+                columns: ["v"],
+                aggregates: { v: ["max by", ["w"]] },
+            });
+
+            const result = await view.to_json();
+            // `max by` picks the `v` at the row with the maximum `w`.
+            expect(result).toEqual([
+                { __ROW_PATH__: [], v: 2 },
+                { __ROW_PATH__: ["x"], v: 2 },
+                { __ROW_PATH__: ["y"], v: 3 },
+            ]);
+            await view.delete();
+            await table.delete();
+        });
+
         test("Aggregates are not in columns are ignored", async function () {
             const table = await perspective.table(data);
             const view = await table.view({
@@ -2382,6 +2428,95 @@ const std = (nums) => {
             expect(result).toEqual(answer);
             view.delete();
             table.delete();
+        });
+    });
+
+    test.describe("Invalid aggregates", function () {
+        const rejects = async (aggregates, message) => {
+            const table = await perspective.table(data);
+            await expect(
+                table.view({ group_by: ["y"], columns: ["x"], aggregates }),
+            ).rejects.toThrow(message);
+
+            // The `Table` survives a rejected `View` - the aggregate is
+            // refused before any context is built.
+            const view = await table.view({
+                group_by: ["y"],
+                columns: ["x"],
+                aggregates: { x: "sum" },
+            });
+
+            expect(await view.to_columns()).toEqual({
+                __ROW_PATH__: [[], ["a"], ["b"], ["c"], ["d"]],
+                x: [10, 1, 2, 3, 4],
+            });
+
+            await view.delete();
+            await table.delete();
+        };
+
+        test("unrecognized aggregate name", async function () {
+            await rejects(
+                { x: "sumz" },
+                "Abort(): Invalid aggregate 'sumz' for column 'x' found in View aggregates.",
+            );
+        });
+
+        test("`identity` is named but unimplemented", async function () {
+            await rejects(
+                { x: "identity" },
+                "Abort(): Unimplemented aggregate 'identity' for column 'x' found in View aggregates.",
+            );
+        });
+
+        test("`mean by count` is named but unimplemented", async function () {
+            await rejects(
+                { x: "mean by count" },
+                "Abort(): Unimplemented aggregate 'mean by count' for column 'x' found in View aggregates.",
+            );
+        });
+
+        test("`div` cannot be configured from a ViewConfig", async function () {
+            await rejects(
+                { x: "div" },
+                "Abort(): Unimplemented aggregate 'div' for column 'x' found in View aggregates.",
+            );
+        });
+
+        test("argument-taking aggregate with no argument", async function () {
+            await rejects(
+                { x: "weighted mean" },
+                "Abort(): Aggregate 'weighted mean' for column 'x' requires a column argument.",
+            );
+        });
+
+        test("argument-taking aggregate with an unknown argument", async function () {
+            await rejects(
+                { x: ["weighted mean", ["nosuchcolumn"]] },
+                "Abort(): Invalid column 'nosuchcolumn' found in the 'weighted mean' aggregate for column 'x'.",
+            );
+        });
+
+        test("snake_case argument-taking aggregates read their argument", async function () {
+            const table = await perspective.table([
+                { x: 1, w: 1, y: "a" },
+                { x: 3, w: 3, y: "a" },
+            ]);
+
+            const view = await table.view({
+                group_by: ["y"],
+                columns: ["x"],
+                aggregates: { x: ["weighted_mean", ["w"]] },
+            });
+
+            // (1*1 + 3*3) / (1 + 3), not null.
+            expect(await view.to_columns()).toEqual({
+                __ROW_PATH__: [[], ["a"]],
+                x: [2.5, 2.5],
+            });
+
+            await view.delete();
+            await table.delete();
         });
     });
 
